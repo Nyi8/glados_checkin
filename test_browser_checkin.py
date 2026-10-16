@@ -20,11 +20,13 @@ def ensure_playwright_available():
 
 
 class FakeLocator:
-    def __init__(self, count=1, text="Checkin", disabled=False, on_click=None):
+    def __init__(self, count=1, text="Checkin", disabled=False, on_click=None,
+                 classes="checkin-cute-btn"):
         self._count = count
         self._text = text
         self._disabled = disabled
         self._on_click = on_click or (lambda: None)
+        self._classes = classes
 
     @property
     def first(self):
@@ -32,6 +34,9 @@ class FakeLocator:
 
     def count(self):
         return self._count
+
+    def get_attribute(self, name, timeout=None):
+        return self._classes if name == "class" else None
 
     def inner_text(self, timeout=None):
         return self._text
@@ -73,10 +78,12 @@ class PlaywrightContextManager(FakeContextManager):
 class FakePage:
     def __init__(self, url="https://glados.cloud/console/checkin", title="GLaDOS",
                  count=1, text="Checkin", disabled=False, body_text="", response=None,
-                 click_error=None, goto_error=None, selector_error=None):
+                 click_error=None, goto_error=None, selector_error=None,
+                 classes="checkin-cute-btn", disabled_after_click=False):
         self.url = url
         self._title = title
-        self._locator = FakeLocator(count, text, disabled)
+        self._locator = FakeLocator(count, text, disabled, classes=classes)
+        self._disabled_after_click = disabled_after_click
         self._body_text = body_text
         # 默认给一个成功的签到响应，避免忘记传 response 时 _attempt 拿到 None。
         self._response = response if response is not None else FakeResponse()
@@ -109,10 +116,13 @@ class FakePage:
     def expect_response(self, predicate, timeout=None):
         self.predicate = predicate
         if self._click_error:
-            self._locator._on_click = lambda: (_ for _ in ()).throw(self._click_error)
+            def _fail():
+                self._locator._disabled = self._disabled_after_click
+                raise self._click_error
+            self._locator._on_click = _fail
         return FakeContextManager(self._response)
 
-    def inner_text(self, selector, timeout=None):
+    def inner_text(self, selector=None, timeout=None):
         return self._body_text
 
     def screenshot(self, path=None, full_page=None):
@@ -232,6 +242,26 @@ class AttemptTests(unittest.TestCase):
         result = browser_checkin._attempt(page, None)
         self.assertEqual(result.status, "already")
         self.assertEqual(result.source, "dom")
+
+    def test_disabled_button_without_known_text_is_still_already(self):
+        # 站点自己的完成态（disabled + is-done）就是证据，文案不认识也不能算失败。
+        page = FakePage(disabled=True, text="已签", body_text="Points 33 STREAK 1 DAYS LEFT 243",
+                        classes="checkin-cute-btn is-done")
+        result = browser_checkin._attempt(page, None)
+        self.assertEqual(result.status, "already")
+
+    def test_click_timeout_but_button_still_clickable_is_retryable(self):
+        page = FakePage(click_error=TimeoutError("timeout"), text="Checkin",
+                        body_text="Points 33", disabled_after_click=False)
+        with self.assertRaises(browser_checkin.RetryableError):
+            browser_checkin._attempt(page, None)
+
+    def test_click_timeout_with_button_now_disabled_is_already(self):
+        page = FakePage(click_error=TimeoutError("timeout"), text="Checkin",
+                        disabled_after_click=True, classes="checkin-cute-btn is-done",
+                        body_text="Points 33")
+        result = browser_checkin._attempt(page, None)
+        self.assertEqual(result.status, "already")
 
     def test_permission_denied_is_fatal(self):
         page = FakePage(response=FakeResponse({"code": -2, "message": "没有权限"}))

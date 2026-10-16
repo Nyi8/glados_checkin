@@ -46,8 +46,9 @@ MAX_JITTER_MINUTES = 120
 
 SUCCESS_MARKERS = ("checkin! got", "checkin repeats", "observation logged")
 ALREADY_CHECKED_IN_MARKERS = (
-    "checkin repeats", "observation logged", "already checkin",
-    "try tomorrow", "已签到", "明天再来", "重复签到",
+    "checkin repeats", "observation logged", "already checkin", "already checked",
+    "try tomorrow", "已签到", "今天已签到", "今日已签到", "明天再来", "重复签到",
+    "签到了", "下次再来",
 )
 AUTH_ERROR_MARKERS = (
     "没有权限", "未登录", "请先登录", "登录已过期", "not login",
@@ -188,6 +189,15 @@ def _screenshot(page, tag):
         return None
 
 
+def _button_is_done(page):
+    """站点用 .checkin-cute-btn.is-done 表示今日已签到（按钮同时 disabled）。"""
+    try:
+        classes = page.locator(CHECKIN_BUTTON).first.get_attribute("class", timeout=5_000) or ""
+        return "is-done" in classes.split()
+    except Exception:
+        return False
+
+
 def _button_state(page):
     """返回 (是否存在, 是否禁用, 按钮文案)。"""
     locator = page.locator(CHECKIN_BUTTON).first
@@ -270,7 +280,8 @@ def _attempt(page, cookie_header=None):
     exists, disabled, label = _button_state(page)
     if not exists:
         raise RetryableError("没有找到签到按钮，站点结构可能已变化。")
-    log(f"签到按钮：文案={label!r}，disabled={disabled}")
+    done_class = _button_is_done(page)
+    log(f"签到按钮：文案={label!r}，disabled={disabled}，is-done={done_class}")
 
     if disabled:
         text = _page_text(page)
@@ -278,10 +289,18 @@ def _attempt(page, cookie_header=None):
         if result.ok:
             log(f"按钮不可点击，页面显示今日已完成：{result.message}")
             return result
-        log(f"按钮不可点击但页面没有成功文案，改为点击一次：{text[:200]!r}")
+        # 站点自己的完成态就是最强证据：按钮被禁用即今日已签到，不要误判为失败。
+        log(f"按钮不可点击（is-done={done_class}），按“今日已签到”处理；页面文案片段={text[:200]!r}")
+        return CheckinResult("already", label or "按钮已禁用（今日已签到）", source="dom")
 
     try:
         log("点击签到按钮…")
+        # 诊断用：把点击瞬间的按钮状态和随后所有 /api/user/checkin 请求记录下来。
+        try:
+            log(f"点击前按钮：disabled={page.locator(CHECKIN_BUTTON).first.is_disabled(timeout=5_000)}，"
+                f"文案={(page.locator(CHECKIN_BUTTON).first.inner_text(timeout=5_000) or '').strip()!r}")
+        except Exception as exc:
+            log(f"WARNING: 读取点击前按钮状态失败：{redact(exc)}")
         with page.expect_response(
             lambda response: bool(CHECKIN_API.search(response.url))
             and response.request.method.upper() == "POST",
@@ -296,17 +315,33 @@ def _attempt(page, cookie_header=None):
             raise RetryableError(f"签到接口返回非 JSON 内容（HTTP {response.status}）。") from exc
         result = classify_payload(payload)
         log(f"签到接口 code={payload.get('code')}，message={payload.get('message', '<none>')}，"
-            f"reason={payload.get('reason', '<none>')}")
+            f"reason={payload.get('reason', '<none>')}，points={payload.get('points', '<none>')}")
         return result
     except (FatalError, RetryableError):
         raise
     except Exception as exc:
         # 点击超时或接口异常：先看页面自己渲染出的结果，避免误报失败。
         log(f"WARNING: 等待签到接口回复失败：{redact(exc)}")
-        result = classify_page_state(_page_text(page))
+        for name, locator in (("按钮文案", page.locator(CHECKIN_BUTTON).first),
+                              ("checkinResult", page.locator(".checkinResult").first)):
+            try:
+                log(f"现场 {name}={locator.inner_text(timeout=3_000)!r}")
+            except Exception:
+                pass
+        text = _page_text(page)
+        log(f"现场页面文案片段={text[:600]!r}")
+        result = classify_page_state(text)
         if result.ok or result.status == "fatal":
             log(f"改用页面渲染结果判定：{result.status}（{result.message}）")
             return result
+        # 还有一种情况：点击的正是已经签到的按钮（被禁用，不会发请求）。
+        try:
+            now_disabled = page.locator(CHECKIN_BUTTON).first.is_disabled(timeout=5_000)
+        except Exception:
+            now_disabled = False
+        if now_disabled:
+            log("点击后按钮已禁用，站点自身状态显示今日已完成，按“今日已签到”处理。")
+            return CheckinResult("already", "按钮已禁用（今日已签到）", source="dom")
         raise RetryableError(f"点击签到按钮后没有拿到结果：{redact(exc)}") from exc
 
 
