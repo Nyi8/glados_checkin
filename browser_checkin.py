@@ -10,6 +10,7 @@
   0 成功或今日已签到，1 需要人工处理的致命错误，2 临时故障。
 """
 import argparse
+import json
 import os
 import random
 import re
@@ -34,6 +35,11 @@ LOGIN_URL = "https://glados.cloud/login"
 CHECKIN_API = re.compile(r"/api/user/checkin(?:$|\?)")
 CHECKIN_BUTTON = "button.checkin-cute-btn"
 ARTIFACT_DIR = "artifacts"
+
+# GLaDOS 前端把设备指纹缓存在 localStorage，并作为 Authorization 请求头发出；
+# 服务端据此校验"登录设备"，不一致就返回 code=4 / device-mismatch。
+FP_STORAGE_KEY = "glados.fp.v1"
+FP_PATTERN = re.compile(r"^fp1\.[0-9a-f]{16,64}$")
 
 EXIT_OK, EXIT_FATAL, EXIT_RETRYABLE = 0, 1, 2
 
@@ -172,6 +178,52 @@ def _cookie_list(cookie_header):
 
 def _user_agent():
     return get_env("GLADOS_USER_AGENT") or None
+
+
+def get_fingerprint():
+    """读取浏览器设备指纹 fp1.<hex>，来源：GLADOS_FP 或 GLADOS_FP_FILE。"""
+    value = get_env("GLADOS_FP")
+    path = get_env("GLADOS_FP_FILE")
+    if not value and path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = handle.read().strip()
+        except OSError as exc:
+            raise FatalError(f"读取 GLADOS_FP_FILE 失败：{exc}") from exc
+    if not value:
+        return ""
+    if not FP_PATTERN.match(value):
+        raise FatalError(
+            "GLADOS_FP 格式不正确：应当是 fp1. 开头加 16-64 位十六进制，"
+            f"当前长度 {len(value)}；请用 python -u print_fingerprint.py 重新导出。"
+        )
+    return value
+
+
+def _install_fingerprint(context, fingerprint):
+    """把指纹写进 localStorage，让站点的指纹计算函数直接命中缓存。
+
+    站点逻辑是：localStorage["glados.fp.v1"] 命中正则就拿来当 Authorization；
+    否则用 canvas/webgl/时区等实时计算。runner 上没有 GPU、platform 也是 Linux，
+    实时算出来的必然与登录设备不一致，所以这里必须沿用登录时的缓存值。
+    """
+    context.add_init_script(
+        """
+        (() => {
+          const KEY = %s;
+          const VALUE = %s;
+          try {
+            const original = Storage.prototype.getItem;
+            Storage.prototype.getItem = function (key) {
+              if (key === KEY) return VALUE;
+              return original.call(this, key);
+            };
+            if (window.localStorage) window.localStorage.setItem(KEY, VALUE);
+          } catch (error) { /* localStorage 不可用时忽略 */ }
+        })();
+        """
+        % (json.dumps(FP_STORAGE_KEY), json.dumps(fingerprint))
+    )
 
 
 def _screenshot(page, tag):
@@ -418,6 +470,13 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
             if user_agent:
                 context_options["user_agent"] = user_agent
             context = browser.new_context(**context_options)
+            fingerprint = get_fingerprint()
+            if fingerprint:
+                _install_fingerprint(context, fingerprint)
+                log(f"已注入设备指纹 {fingerprint[:12]}…（来源 GLADOS_FP，共 {len(fingerprint)} 字符）")
+            else:
+                log("WARNING: 未配置 GLADOS_FP，将使用 runner 实时计算的指纹；"
+                    "服务端大概率返回 device-mismatch。请用 print_fingerprint.py 从登录设备导出。")
             context.add_cookies(_cookie_list(cookie))
             log(f"已注入 {len(parse_cookie_pairs(cookie))} 个 Cookie 字段（不显示值）。")
             page = context.new_page()
@@ -486,11 +545,13 @@ def _exit_code(status):
 def _fatal_hint(result):
     message = result.message or "签到失败"
     lowered = message.lower()
-    if DEVICE_MISMATCH_MARKER in lowered or "登录设备" in message:
+    if DEVICE_MISMATCH_MARKER in lowered or "登录设备" in message or "automated" in lowered:
         return (
-            "GLaDOS 判定登录设备与签到设备不一致。请在**同一台**电脑的 Chrome/Edge 上重新登录 "
-            "glados.cloud，然后把完整 Cookie 与 chrome://version 里的完整 User-Agent "
-            "一起更新到仓库（GLADOS_COOKIE / GLADOS_USER_AGENT）。"
+            "GLaDOS 用浏览器里的设备指纹（localStorage 的 glados.fp.v1，作为 Authorization "
+            "请求头发送）校验登录设备，runner 上算出来的指纹与登录设备不同，所以被拒。"
+            "请在登录 GLaDOS 的那台电脑上执行："
+            "& .venv\\Scripts\\python.exe print_fingerprint.py，"
+            "把输出的 fp1.… 存为仓库 Secret GLADOS_FP，同时确认 GLADOS_USER_AGENT 是同一浏览器的完整 UA。"
         )
     if any(marker in message.lower() for marker in AUTH_ERROR_MARKERS) or "没有权限" in message:
         return (

@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -188,6 +190,53 @@ class ClassifyPayloadTests(unittest.TestCase):
         self.assertTrue(classify_page_state("Checkin repeats! Please try tomorrow").ok)
         self.assertEqual(classify_page_state("没有权限").status, "fatal")
         self.assertEqual(classify_page_state("").status, "retryable")
+
+
+class FingerprintTests(unittest.TestCase):
+    def setUp(self):
+        self.logging = patch.object(browser_checkin, "log")
+        self.logging.start()
+        self.addCleanup(self.logging.stop)
+
+    def test_missing_fingerprint_returns_empty(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(browser_checkin.get_fingerprint(), "")
+
+    def test_valid_fingerprint_is_returned(self):
+        value = "fp1." + "a" * 48
+        with patch.dict("os.environ", {"GLADOS_FP": value}, clear=True):
+            self.assertEqual(browser_checkin.get_fingerprint(), value)
+
+    def test_google_like_reference_fingerprint_is_accepted(self):
+        # 真实值是 sha256 前 48 位十六进制
+        value = "fp1." + "a1b2c3d4e5f6" * 4
+        self.assertEqual(len(value), 4 + 48)
+        with patch.dict("os.environ", {"GLADOS_FP": value}, clear=True):
+            self.assertEqual(browser_checkin.get_fingerprint(), value)
+
+    def test_bad_fingerprint_is_rejected(self):
+        for value in ("fp1.short", "abc", "fp1." + "z" * 48):
+            with self.subTest(value=value), \
+                    patch.dict("os.environ", {"GLADOS_FP": value}, clear=True), \
+                    self.assertRaises(browser_checkin.FatalError):
+                browser_checkin.get_fingerprint()
+
+    def test_fingerprint_file_is_used(self):
+        value = "fp1." + "b" * 48
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "fp.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(value + "\n")
+            with patch.dict("os.environ", {"GLADOS_FP_FILE": path}, clear=True):
+                self.assertEqual(browser_checkin.get_fingerprint(), value)
+
+    def test_init_script_installs_localstorage_override(self):
+        context = Mock()
+        browser_checkin._install_fingerprint(context, "fp1." + "c" * 48)
+        script = context.add_init_script.call_args.args[0]
+        self.assertIn(browser_checkin.FP_STORAGE_KEY, script)
+        self.assertIn("fp1." + "c" * 48, script)
+        self.assertIn("Storage.prototype.getItem", script)
 
 
 class JitterTests(unittest.TestCase):

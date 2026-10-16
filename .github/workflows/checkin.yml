@@ -55,6 +55,8 @@ jobs:
         env:
           GLADOS_COOKIE: ${{ secrets.GLADOS_COOKIE }}
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
+          # 登录设备的指纹；不配置时服务端会返回 code=4 / device-mismatch。
+          GLADOS_FP: ${{ secrets.GLADOS_FP }}
           GLADOS_JITTER_MIN_MINUTES: ${{ vars.GLADOS_JITTER_MIN_MINUTES }}
           GLADOS_JITTER_MAX_MINUTES: ${{ vars.GLADOS_JITTER_MAX_MINUTES }}
           # 手动触发时立即签到，不定时触发的自动任务才做随机等待。
