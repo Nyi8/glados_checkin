@@ -80,6 +80,13 @@ class SessionKindTests(unittest.TestCase):
             cookie_util.require_current_session(cookie)
         self.assertIn("gld:sess.sig", str(raised.exception))
 
+    def test_field_names_correct_but_value_truncated_is_rejected(self):
+        # 线上出现过 103 字节的输入：字段名齐了，但值被截断。
+        cookie = header(("gld:sess", "short"), ("gld:sess.sig", "sig"))
+        with self.assertRaises(cookie_util.FatalError) as raised:
+            cookie_util.require_current_session(cookie)
+        self.assertIn("截断", str(raised.exception))
+
     def test_parse_cookie_pairs_keeps_every_field(self):
         cookie = header(("gld:sess", GLD_SESS), ("gld:sess.sig", GLD_SIG), ("device", "abc"))
         self.assertEqual(

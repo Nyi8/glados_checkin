@@ -57,6 +57,8 @@ jobs:
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           GLADOS_JITTER_MIN_MINUTES: ${{ vars.GLADOS_JITTER_MIN_MINUTES }}
           GLADOS_JITTER_MAX_MINUTES: ${{ vars.GLADOS_JITTER_MAX_MINUTES }}
+          # 手动触发时立即签到，不定时触发的自动任务才做随机等待。
+          GH_EVENT: ${{ github.event_name }}
           GLADOS_SCREENSHOT_ON_FAIL: "1"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}

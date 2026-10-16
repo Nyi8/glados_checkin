@@ -144,6 +144,13 @@ def require_current_session(cookie):
     kind = session_cookie_kind(cookie)
     names = [name for name, _ in parse_cookie_pairs(cookie)]
     if kind == "gld":
+        # 字段名对了但整体过短：通常是只复制了值、或复制时被截断/丢了后半段。
+        if len(cookie) < MIN_PLAUSIBLE_SESSION_LENGTH:
+            raise FatalError(
+                f"Cookie 字段名正确（gld:sess + gld:sess.sig），但整串只有 {len(cookie)} 字节，"
+                "对不上真实会话长度，几乎肯定是复制时被截断（只复制了值、或只复制了一部分）。"
+                "请在 Network 里右键 Cookie → Copy value，整行粘贴，不要手工删减。"
+            )
         return "gld"
     if kind == "koa":
         raise FatalError(

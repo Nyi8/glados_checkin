@@ -78,7 +78,8 @@ class FakePage:
         self._title = title
         self._locator = FakeLocator(count, text, disabled)
         self._body_text = body_text
-        self._response = response
+        # 默认给一个成功的签到响应，避免忘记传 response 时 _attempt 拿到 None。
+        self._response = response if response is not None else FakeResponse()
         self._click_error = click_error
         self._goto_error = goto_error
         self._selector_error = selector_error
@@ -247,6 +248,16 @@ class AttemptTests(unittest.TestCase):
         with self.assertRaises(browser_checkin.RetryableError):
             browser_checkin._attempt(page, None)
 
+    def test_retry_uses_fresh_page_between_attempts(self):
+        page = FakePage()
+        results = [CheckinResult("retryable", "temporary"),
+                   CheckinResult("success", "Checkin! Got 12")]
+        with patch.object(browser_checkin, "_attempt", side_effect=results), \
+                patch.object(browser_checkin.time, "sleep") as sleep:
+            result = browser_checkin._checkin_with_retry(page, 2, 0)
+        self.assertTrue(result.ok)
+        sleep.assert_called_once_with(0)
+
 
 class RetryTests(unittest.TestCase):
     def setUp(self):
@@ -345,6 +356,30 @@ class RunTests(unittest.TestCase):
                                                dry_run=True)
         jitter.assert_not_called()
         self.assertTrue(result.ok)
+
+    def test_manual_run_skips_jitter(self):
+        page = FakePage()
+        playwright_cm, _ = self._fake_playwright(lambda: page)
+        cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
+        with self._patch_playwright(playwright_cm), \
+                patch.object(browser_checkin, "sleep_with_jitter") as jitter, \
+                patch.dict("os.environ", {"GH_EVENT": "workflow_dispatch"}):
+            code, result = browser_checkin.run(cookie_header=cookie, headless=True,
+                                               retry_delay=0)
+        jitter.assert_not_called()
+        self.assertTrue(result.ok)
+
+    def test_scheduled_run_still_waits(self):
+        page = FakePage()
+        playwright_cm, _ = self._fake_playwright(lambda: page)
+        cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
+        with self._patch_playwright(playwright_cm), \
+                patch.object(browser_checkin, "sleep_with_jitter") as jitter, \
+                patch.dict("os.environ", {"GH_EVENT": "schedule",
+                                          "GLADOS_JITTER_MIN_MINUTES": "5",
+                                          "GLADOS_JITTER_MAX_MINUTES": "90"}):
+            browser_checkin.run(cookie_header=cookie, headless=True, retry_delay=0)
+        jitter.assert_called_once_with(5, 90)
 
     def test_missing_playwright_is_a_fatal_configuration_error(self):
         cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120

@@ -334,9 +334,12 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
         log("WARNING: Cookie 未包含完整 gld:sess 与 gld:sess.sig，新版接口很可能会拒绝。")
 
     if apply_jitter and not dry_run:
-        min_minutes = int(get_env("GLADOS_JITTER_MIN_MINUTES", "0"))
-        max_minutes = int(get_env("GLADOS_JITTER_MAX_MINUTES", "90"))
-        sleep_with_jitter(min_minutes, max_minutes)
+        min_minutes = get_env("GLADOS_JITTER_MIN_MINUTES", "0")
+        max_minutes = get_env("GLADOS_JITTER_MAX_MINUTES", "90")
+        if get_env("GH_EVENT") == "workflow_dispatch":
+            log("检测到手动触发（workflow_dispatch），跳过随机等待，立即签到。")
+        else:
+            sleep_with_jitter(int(min_minutes), int(max_minutes))
     elif dry_run:
         log("dry-run：跳过随机等待，也不点击签到按钮。")
 

@@ -49,8 +49,11 @@ koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新
 ~~~
 
 也支持：带 `Cookie:` 前缀、整段外层引号、Cookie-Editor 的 JSON 数组、
-以及只有两个裸值的旧格式。脚本会拒绝明显过短（< 300 字节）、缺 `gld:sess.sig`
-或只有 `koa` 会话的输入，并直接告诉你该重新取哪一项，不再向服务端发注定失败的请求。
+以及只有两个裸值的旧格式。脚本会拒绝明显过短（< 300 字节）、字段名齐但值被截断、
+缺 `gld:sess.sig` 或只有 `koa` 会话的输入，并直接告诉你该重新取哪一项，
+不再向服务端发注定失败的请求。如果日志里出现
+`Cookie 字段名正确（gld:sess + gld:sess.sig），但整串只有 XXX 字节`，
+说明复制被截断了，请在 Network 里右键 **Cookie → Copy value** 整行粘贴。
 
 ## 随机签到时间
 
@@ -58,6 +61,13 @@ koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新
 - 脚本内等待 `GLADOS_JITTER_MIN_MINUTES`–`GLADOS_JITTER_MAX_MINUTES`
   （默认 `0`–`90`）之间的**随机**时长，然后才点击签到；
 - 也就是实际签到落在 **09:00–10:30** 之间的随机时刻，每天不同；
+- **手动 `Run workflow` 不等待**（识别 `workflow_dispatch` 后立即签到），
+  方便你随时验证；只有定时任务才做随机等待；
+- 本地也可以 `--no-jitter` 跳过等待；
+- 这段等待确实占用 Actions 的运行时长（私有仓库按分钟计费，按墙钟时间算，
+  90 分钟等待就是 90 分钟额度）。本仓库是公开仓库，Actions 分钟数免费且不限量，
+  所以没有额外开销；如果之后改成私有仓库，可把 `GLADOS_JITTER_MAX_MINUTES`
+  调小（例如 30）来省额度；
 - 日志会打印随机等待时长和真实点击时间，方便核对；
 - GitHub 定时任务在高峰期本身可能延迟，实际时间会相应后移（日志以真实点击时间为准）。
 
