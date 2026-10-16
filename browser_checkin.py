@@ -345,6 +345,24 @@ def _attempt(page, cookie_header=None):
         raise RetryableError(f"点击签到按钮后没有拿到结果：{redact(exc)}") from exc
 
 
+def _log_checkin_request(request):
+    """记录所有 /api/user/checkin 请求（方法 + 是否在点击之后发出）。"""
+    try:
+        if CHECKIN_API.search(request.url):
+            log(f"发起签到请求：{request.method} {request.url}")
+    except Exception:
+        pass
+
+
+def _log_console_message(message):
+    """只记录报错级别的前端日志，避免刷屏。"""
+    try:
+        if message.type in ("error", "warning"):
+            log(f"页面 {message.type}：{message.text[:200]}")
+    except Exception:
+        pass
+
+
 def _load_sync_playwright():
     """延迟导入 playwright，便于在没装浏览器依赖的环境里跑纯逻辑测试。"""
     try:
@@ -403,6 +421,10 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
             context.add_cookies(_cookie_list(cookie))
             log(f"已注入 {len(parse_cookie_pairs(cookie))} 个 Cookie 字段（不显示值）。")
             page = context.new_page()
+            # 诊断用：记录所有签到接口请求与浏览器弹窗，便于回看"点击到底发生了什么"。
+            page.on("request", _log_checkin_request)
+            page.on("dialog", lambda dialog: log(f"弹出对话框：{dialog.type} {dialog.message!r}"))
+            page.on("console", _log_console_message)
             try:
                 if dry_run:
                     return _dry_run(page)

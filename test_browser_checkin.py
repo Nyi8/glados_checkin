@@ -133,6 +133,12 @@ class FakePage:
     def evaluate(self, *args, **kwargs):
         return None
 
+    def on(self, event, handler=None):
+        """模拟 page.on("request"/"console"/"dialog", ...) 的事件注册。"""
+        self.handlers = getattr(self, "handlers", {})
+        self.handlers[event] = handler
+        return None
+
 
 class FakeResponse:
     def __init__(self, payload=None, status=200, *, raise_json=False):
