@@ -66,12 +66,27 @@ class SessionKindTests(unittest.TestCase):
             cookie_util.require_current_session(cookie)
         self.assertIn("gld:sess", str(raised.exception))
 
-    def test_short_cookie_is_rejected_as_truncated(self):
-        # 这正是线上失败日志里 135 字节那种输入。
-        cookie = header(("gld:sess", "short"), ("x", "y"))
+    def test_real_world_short_cookie_passes(self):
+        # 实测真实值就这么短：gld 两项整串只有 105 字节，必须放行。
+        cookie = header(("gld:sess", "gld_f6038a8db8f6c2e63a47eee77f4f181a46fe9515b832bf02"),
+                        ("gld:sess.sig", "CdjjYfECRG_YACRl4rfE8a4-sHlZs"))
+        self.assertLess(len(cookie), 200)
+        self.assertEqual(cookie_util.require_current_session(cookie), "gld")
+
+    def test_real_world_cookie_with_koa_pair_passes(self):
+        cookie = header(("gld:sess", "gld_f6038a8db8f6c2e63a47eee77f4f181a46fe9515b832bf02"),
+                        ("gld:sess.sig", "CdjjYfECRG_YACRl4rfE8a4-sHlZs"),
+                        ("koa:sess", "eyJ1c2VySWQiOjU1MzEzMSwiX2V4cCI6MTc5NTg2"),
+                        ("koa:sess.sig", "ktimoHOcIRhw2lO2fpNGaNSlzol"))
+        self.assertLess(len(cookie), 250)
+        self.assertEqual(cookie_util.require_current_session(cookie), "gld")
+
+    def test_truncated_value_is_rejected(self):
+        # 线上出现过 103 字节的输入：字段名齐了，但值被截断。
+        cookie = header(("gld:sess", "gl"), ("gld:sess.sig", "Cd"))
         with self.assertRaises(cookie_util.FatalError) as raised:
             cookie_util.require_current_session(cookie)
-        self.assertIn("长度", str(raised.exception))
+        self.assertIn("截断", str(raised.exception))
 
     def test_incomplete_current_session_is_rejected_by_name(self):
         cookie = header(("gld:sess", GLD_SESS), ("koa:sess", KOA_SESS),
@@ -79,13 +94,6 @@ class SessionKindTests(unittest.TestCase):
         with self.assertRaises(cookie_util.FatalError) as raised:
             cookie_util.require_current_session(cookie)
         self.assertIn("gld:sess.sig", str(raised.exception))
-
-    def test_field_names_correct_but_value_truncated_is_rejected(self):
-        # 线上出现过 103 字节的输入：字段名齐了，但值被截断。
-        cookie = header(("gld:sess", "short"), ("gld:sess.sig", "sig"))
-        with self.assertRaises(cookie_util.FatalError) as raised:
-            cookie_util.require_current_session(cookie)
-        self.assertIn("截断", str(raised.exception))
 
     def test_parse_cookie_pairs_keeps_every_field(self):
         cookie = header(("gld:sess", GLD_SESS), ("gld:sess.sig", GLD_SIG), ("device", "abc"))

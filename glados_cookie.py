@@ -17,7 +17,10 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 CURRENT_SESSION_COOKIES = ("gld:sess", "gld:sess.sig")
 LEGACY_SESSION_COOKIES = ("koa:sess", "koa:sess.sig")
 
-MIN_PLAUSIBLE_SESSION_LENGTH = 300
+# 真实 gld 会话的值：gld:sess 约 52 字符、gld:sess.sig 约 29 字符（实测）。
+# 远低于这个下限说明复制被截断，但绝不能因为"整串短"就拒绝合法 Cookie。
+MIN_PLAUSIBLE_COOKIE_VALUE = 12
+SHORT_VALUE_WARNING = 24
 
 COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_\x60|~0-9A-Za-z:]+$")
 RAW_VALUE = re.compile(r"^[A-Za-z0-9_+/-]+={0,2}$")
@@ -144,13 +147,16 @@ def require_current_session(cookie):
     kind = session_cookie_kind(cookie)
     names = [name for name, _ in parse_cookie_pairs(cookie)]
     if kind == "gld":
-        # 字段名对了但整体过短：通常是只复制了值、或复制时被截断/丢了后半段。
-        if len(cookie) < MIN_PLAUSIBLE_SESSION_LENGTH:
-            raise FatalError(
-                f"Cookie 字段名正确（gld:sess + gld:sess.sig），但整串只有 {len(cookie)} 字节，"
-                "对不上真实会话长度，几乎肯定是复制时被截断（只复制了值、或只复制了一部分）。"
-                "请在 Network 里右键 Cookie → Copy value，整行粘贴，不要手工删减。"
-            )
+        # 字段名对了，再看值本身是否被截断（只看值长度，不看整串长度）。
+        for name, value in parse_cookie_pairs(cookie):
+            if name in CURRENT_SESSION_COOKIES and len(value) < MIN_PLAUSIBLE_COOKIE_VALUE:
+                raise FatalError(
+                    f"Cookie 里 {name} 的值只有 {len(value)} 个字符，不像完整会话值"
+                    f"（实测 gld:sess 约 52、gld:sess.sig 约 29 字符），"
+                    "基本可以确定复制被截断。请在 Network 里右键 Cookie → Copy value 整行粘贴。"
+                )
+            if name in CURRENT_SESSION_COOKIES and len(value) < SHORT_VALUE_WARNING:
+                log(f"WARNING: {name} 的值偏短（{len(value)} 字符），如果签到失败请重新复制 Cookie。")
         return "gld"
     if kind == "koa":
         raise FatalError(
@@ -158,15 +164,9 @@ def require_current_session(cookie):
             "请在 glados.cloud 重新登录，从成功的 /api/user/status 请求里复制含 "
             "gld:sess 与 gld:sess.sig 的完整单行 Cookie 后更新 GLADOS_COOKIE。"
         )
-    if len(cookie) < MIN_PLAUSIBLE_SESSION_LENGTH:
-        raise FatalError(
-            f"Cookie 长度只有 {len(cookie)} 字节，明显不是完整的新版会话（至少需要 "
-            "gld:sess 与 gld:sess.sig 两项）。请确认复制的是 Request Headers 中 "
-            "Cookie 的完整值，并更新 GLADOS_COOKIE。"
-        )
     raise FatalError(
         "Cookie 缺少 gld:sess 或 gld:sess.sig，无法通过 GLaDOS 2026 新版认证。"
-        f"当前字段：{', '.join(names) if names else '<无>'}。"
+        f"当前字段（共 {len(cookie)} 字节）：{', '.join(names) if names else '<无>'}。"
     )
 
 

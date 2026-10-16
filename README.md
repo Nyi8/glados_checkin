@@ -48,12 +48,20 @@
 koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新签名
 ~~~
 
-也支持：带 `Cookie:` 前缀、整段外层引号、Cookie-Editor 的 JSON 数组、
-以及只有两个裸值的旧格式。脚本会拒绝明显过短（< 300 字节）、字段名齐但值被截断、
-缺 `gld:sess.sig` 或只有 `koa` 会话的输入，并直接告诉你该重新取哪一项，
-不再向服务端发注定失败的请求。如果日志里出现
-`Cookie 字段名正确（gld:sess + gld:sess.sig），但整串只有 XXX 字节`，
-说明复制被截断了，请在 Network 里右键 **Cookie → Copy value** 整行粘贴。
+也支持：带 `Cookie:` 前缀、整段外层引号、Cookie-Editor 的 JSON 数组。
+
+Cookie **不需要**四项都齐：只要同时有 `gld:sess` 和 `gld:sess.sig` 就算合格，
+`koa` 两项可有可无、有多余字段也不影响（都原样透传）。真实长度参考：
+`gld:sess` 约 52 字符、`gld:sess.sig` 约 29 字符，两项合起来整串也就 100 字节出头，
+所以脚本**不会**因为"整串短"而拒绝。会被拒绝并给出提示的只有三种：
+
+| 情况 | 提示 |
+| --- | --- |
+| 只有 `koa:sess` + `koa:sess.sig` | 旧版会话，需重新登录取 `gld` 会话 |
+| 缺 `gld:sess` 或 `gld:sess.sig` | 列出实际拿到的字段名 |
+| 字段名齐但值只有几个字符 | `…值只有 N 个字符，不像完整会话值…基本可以确定复制被截断` |
+
+最后一种要求在 Network 里右键 **Cookie → Copy value** 整行粘贴（手动框选长串容易截断）。
 
 ## 随机签到时间
 
