@@ -1,115 +1,118 @@
-# GLaDOS 自动签到
+# GLaDOS 自动签到（真实浏览器点击版）
 
-使用 Python requests，通过 GitHub Actions 每天北京时间 09:00 签到。
-本版本参考 [pyx13638516490/glados_checkin](https://github.com/pyx13638516490/glados_checkin/blob/623e3dcd686ff11addaf628b6561ca7478c4f6d7/checkin.py)
-已验证的请求流程重写：完整 Cookie 原样发送，先签到，再查询会员天数与积分；
-默认请求头与朋友的实现一致（Chrome/126.0）。
+用 GitHub Actions 每天北京时间 **09:00 唤醒**，脚本内再**随机等待 0–90 分钟**，
+然后用真实 Chromium 打开签到页、**模拟点击签到按钮**完成签到。
 
-## Cookie 配置
+## 为什么改成浏览器点击
 
-在自己仓库的 Settings → Secrets and variables → Actions → **Repository secrets**
-中编辑 GLADOS_COOKIE。推荐使用以下第一种格式：
+2026 年 9 月改版后，GLaDOS 只认新版会话，并会校验登录设备：
 
-### 完整 Cookie 请求头（推荐）
-
-登录 https://glados.cloud，按 F12 → Network，刷新页面，
-在成功的 /api/user/status 请求的 Request Headers 中复制 Cookie 的值：
-
-~~~text
-koa:sess=完整会话值; koa:sess.sig=完整签名; 其他Cookie=原始值
-~~~
-
-不要复制响应中的 Set-Cookie 或 Cookie 列表中的 Domain、Path、Expires 属性。
-完整请求头不会进行 HTML 解码、URL 解码或重新排序，附加字段和签名原样保留。
-可以粘贴带 Cookie: 前缀的单行请求头，脚本会移除前缀。
-
-### 分别复制的两个值
-
-先复制 koa:sess 的值，再复制 koa:sess.sig 的值，用空格分隔：
-
-~~~text
-完整会话值 完整签名
-~~~
-
-支持两项之间的换行、聊天软件生成的 &#x20; 空格及整段外侧引号。
-只在这种没有字段名的格式中解码 HTML 空格；Cookie 值本身保持不变。
-
-### Cookie-Editor JSON
-
-支持单个域名、单个账号的 Cookie-Editor 导出格式：
-
-~~~json
-[
-  {"name": "koa:sess", "value": "完整会话值", "domain": "glados.cloud"},
-  {"name": "koa:sess.sig", "value": "完整签名", "domain": "glados.cloud"}
-]
-~~~
-
-不要混合不同域名或多个账号的 Cookie。
-
-日志仅显示输入与请求头的长度及 SHA-256 前 12 位指纹，不显示 Cookie。
-输入完整请求头时两组指纹应一致。更新 Secret 后运行新的任务；
-指纹不变表示实际传入的内容未变化（或更新的是其他仓库/Secret）。
-
-## 请求流程与错误处理
-
-1. 默认直接 POST https://glados.cloud/api/user/checkin，发送 {"token":"glados.cloud"}。
-2. 明确成功或今日已签到后，再查询 /api/user/status 和 /api/user/points。
-3. 状态或积分查询失败只产生警告，不会把已经成功的签到判为失败。
-
-默认使用与朋友相同的 Session 请求头、JSON 序列化和 data= 发送方式。
-仅连接异常、超时、HTTP 429 或 5xx 最多重试三次，默认间隔 10、20 秒。
-主域名网络重试仍失败时，尝试 glados.rocks、glados.network。
--2/没有权限、HTTP 401/403、token 错误和未知结果不会反复重试。
-code=4/reason=device-mismatch 会单独提示登录设备与签到设备不匹配。
-认证失败本身不能区分 Cookie 过期、签名不配对、Secret 内容或账户会话限制。
-
-退出码：0 成功/今日已签到，1 配置或认证等错误，2 临时网络/服务故障。
-工作流直接保留脚本退出码，不使用 continue-on-error 隐藏失败。
-
-## 可选配置
-
-在 Settings → Secrets and variables → Actions → **Variables** 配置：
-
-| Variable | 默认值与用途 |
+| 现象 | 原因 |
 | --- | --- |
-| GLADOS_BASE_URL | https://glados.cloud；必须是受支持的官方 HTTPS 域名 |
-| GLADOS_CHECKIN_TOKEN | 默认取请求域名；cloud 的旧值 glados.one 自动改为 glados.cloud |
-| GLADOS_USER_AGENT | 与参考实现相同的 Chrome/126.0；可填浏览器实际 User-Agent |
-| GLADOS_DOMAIN_FALLBACK | 1；设为 0 关闭网络故障时的备用域名 |
-| GLADOS_RETRY_DELAY_SECONDS | 不填使用 10、20 秒；可设为 0 到 60 的固定秒数 |
+| `{"code":-2,"message":"没有权限"}` | 旧版 `koa:sess` 会话、或 Cookie 不完整 |
+| `code=4 / reason=device-mismatch` | 签到浏览器与登录设备不一致 |
+| 用 requests 直连总失败 | 缺少真实浏览器的 TLS 指纹、`Sec-CH-UA`、站点自身请求头 |
 
-空的可选变量不会覆盖默认值。Cookie 始终放 Secret，不放 Variables 或代码。
+本仓库旧版直接用 `requests` POST `/api/user/checkin`，实测与「不带 Cookie 请求」
+返回完全相同的 `没有权限`，说明服务端根本没认出该会话。现在的方案改成：
 
-## 本地运行与验证
+1. 用 Playwright 启动真实 Chromium（`--headless=new`）；
+2. 注入完整 Cookie，打开 `https://glados.cloud/console/checkin`；
+3. 定位站点自己的签到按钮 `button.checkin-cute-btn` 并**真的点击**；
+4. 抓取站点发出的 `/api/user/checkin` 真实响应判定结果，再读取会员天数与积分。
+
+## 前置条件（必须手动做一次）
+
+在**同一台**电脑的 Chrome/Edge 上：
+
+1. 打开 <https://glados.cloud> 退出后**重新登录**；
+2. F12 → Network → 刷新 → 点开一次成功的 `/api/user/status`；
+3. 在 **Request Headers → Cookie** 里复制**完整的一行值**，确认同时包含
+   `gld:sess=` 与 `gld:sess.sig=`（旧的只有 `koa:sess` 两项是不够的）；
+4. 访问 `chrome://version`，复制**完整的「用户代理 / User-Agent」**；
+5. 到仓库 **Settings → Secrets and variables → Actions**：
+
+| 名称 | 类型 | 内容 |
+| --- | --- | --- |
+| `GLADOS_COOKIE` | Secret | 第 3 步复制的完整 Cookie |
+| `GLADOS_USER_AGENT` | Variable | 第 4 步复制的完整 User-Agent |
+
+第 5 步的 UA 不是可选项：设备校验是按登录设备算的，UA 与 Cookie 必须来自
+**同一次登录的同一个浏览器**，否则会稳定拿到 `device-mismatch`。
+
+### 支持的 Cookie 格式
+
+完整单行请求头（推荐，原样透传，不做 HTML/URL 解码）：
+
+~~~text
+koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新签名
+~~~
+
+也支持：带 `Cookie:` 前缀、整段外层引号、Cookie-Editor 的 JSON 数组、
+以及只有两个裸值的旧格式。脚本会拒绝明显过短（< 300 字节）、缺 `gld:sess.sig`
+或只有 `koa` 会话的输入，并直接告诉你该重新取哪一项，不再向服务端发注定失败的请求。
+
+## 随机签到时间
+
+- 工作流定时：`cron: "0 1 * * *"` = 北京时间 **09:00 唤醒**；
+- 脚本内等待 `GLADOS_JITTER_MIN_MINUTES`–`GLADOS_JITTER_MAX_MINUTES`
+  （默认 `0`–`90`）之间的**随机**时长，然后才点击签到；
+- 也就是实际签到落在 **09:00–10:30** 之间的随机时刻，每天不同；
+- 日志会打印随机等待时长和真实点击时间，方便核对；
+- GitHub 定时任务在高峰期本身可能延迟，实际时间会相应后移（日志以真实点击时间为准）。
+
+## 配置项
+
+在 **Settings → Secrets and variables → Actions → Variables**：
+
+| Variable | 默认与用途 |
+| --- | --- |
+| `GLADOS_USER_AGENT` | **建议填**登录浏览器的完整 UA，用于通过设备校验 |
+| `GLADOS_JITTER_MIN_MINUTES` | 0；随机等待下限（分钟） |
+| `GLADOS_JITTER_MAX_MINUTES` | 90；随机等待上限（分钟，最大 120） |
+
+失败邮件沿用旧配置（可留空）：`SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` /
+`SMTP_PASSWORD` / `SMTP_USE_SSL` / `MAIL_TO` / `MAIL_FROM`。
+邮件正文只包含脱敏后的错误说明与 Actions 链接，不含 Cookie。
+
+## 结果与退出码
+
+- `code=0`，或 `Checkin!`、`Checkin Repeats! Please Try Tomorrow`、
+  `Today's observation logged` → 成功（含今日已签到）；
+- `没有权限` / `HTTP 401/403` → 致命：Cookie 需要重新获取；
+- `code=4` 且 `reason=device-mismatch` → 致命：需在同一台电脑重新登录并同步更新
+  Cookie 与 `GLADOS_USER_AGENT`；
+- 超时、429、5xx、被识别为自动化 → 同一次运行内最多重试 2 次（间隔 60 秒）。
+
+退出码：`0` 成功，`1` 配置/认证类错误，`2` 临时故障。
+失败时会把截图上传为 `checkin-failure-screenshots` 工件（保留 7 天）。
+
+## 本机运行（依赖装在仓库内的隔离虚拟环境）
+
+不会往系统默认 Python 里装任何包：
 
 ~~~powershell
-pip install -r requirements.txt
-$env:GLADOS_COOKIE='koa:sess=完整值; koa:sess.sig=完整签名'
-python -u checkin.py
-python -B -m unittest -v
+pwsh -File setup_env.ps1          # 创建 .venv，安装 requests + playwright，并尽量下载 Chromium
+
+# 只看登录态，不等待随机时间、不点击（推荐先跑这个）
+$env:GLADOS_COOKIE='gld:sess=...; gld:sess.sig=...'
+& .venv\Scripts\python.exe checkin.py --dry-run --channel chrome
+
+# 真正签到（会随机等待，用 --no-jitter 可跳过等待）
+& .venv\Scripts\python.exe checkin.py --no-jitter --channel chrome
+
+# 离线单测（不需要浏览器）
+& .venv\Scripts\python.exe -B -m unittest -q
 ~~~
 
-GitHub Actions 使用 Python 3.12，运行前自动执行不连接真实账户的回归测试，
-支持手动 Run workflow。任务最多运行 15 分钟，并避免同仓库签到任务并发。
+`--channel chrome`（或 `msedge`）让 Playwright 直接用系统里已装好的浏览器，
+不必下载 Chromium；CI 上则用 `python -m playwright install --with-deps chromium`。
+浏览器缓存默认写到 `.ms-playwright/`（已在 `.gitignore`），不污染用户目录。
 
-## 失败邮件与仓库保活
+`.venv/`、`artifacts/`、`__pycache__/` 同样已加入 `.gitignore`。
 
-保留可选失败邮件。认证/配置错误立即通知；网络故障重试耗尽后通知。
-在 Repository secrets 设置以下字段；缺少配置时跳过邮件，签到仍返回失败。
+## 定时任务与保活
 
-| Secret | 说明 |
-| --- | --- |
-| SMTP_HOST | SMTP 主机 |
-| SMTP_PORT | 默认 587；SSL 通常为 465 |
-| SMTP_USERNAME | 登录用户名 |
-| SMTP_PASSWORD | SMTP 密码或应用专用密码 |
-| SMTP_USE_SSL | 465 通常设 true；默认 false 使用 STARTTLS |
-| MAIL_TO | 收件人 |
-| MAIL_FROM | 可选；默认使用 SMTP 用户名 |
-
-邮件只包含脱敏的错误说明与 Actions 链接。
-
-保活工作流保持原配置：每天检查提交时间，达到 45 天时创建空提交。
-它需要仓库 Settings → Actions → General → Workflow permissions 中的
-Read and write permissions，工作流同时声明 contents: write。
+工作流支持手动 `Run workflow` 测试；`concurrency` 保证不会同时跑两个签到。
+保活工作流保持原样：每 45 天提交一次空提交，避免定时任务被停用，
+需要仓库 Settings → Actions → General → Workflow permissions 开启 Read and write。
