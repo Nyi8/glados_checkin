@@ -3,6 +3,63 @@
 用 GitHub Actions 每天北京时间 **09:00 唤醒**，脚本内再**随机等待 0–90 分钟**，
 然后用真实 Chromium 打开签到页、**模拟点击签到按钮**完成签到。
 
+## 推荐方案：QQ 邮箱验证码自动登录
+
+设置 `GLADOS_AUTH_MODE=email` 后，每次任务在 **Actions 自己启动的同一个浏览器**里：
+
+1. 通过 GLaDOS 登录页的 `Get Code` 申请验证码；
+2. 通过 QQ IMAP TLS 读取本次申请后收到的验证码邮件；
+3. 在登录页输入验证码并点击 `Login`；
+4. 直接用这个浏览器完成签到，结束后销毁浏览器会话。
+
+Cookie 和站点生成的设备指纹都来自本次运行，避免把电脑上的 Cookie 搬到另一台设备。
+邮箱模式忽略 `GLADOS_COOKIE`、`GLADOS_FP`、`GLADOS_USER_AGENT`、`GLADOS_FP_FILE`；
+原 Cookie 模式仍是默认值，不更改配置就保持原有行为。
+
+**一次性配置**：
+
+先在 [QQ 邮箱](https://mail.qq.com/) 设置中开启 IMAP/SMTP 服务，生成客户端授权码。
+这里使用的是**邮箱授权码**，不是 QQ 密码，也不是 GLaDOS 发来的临时验证码。
+可参阅 [QQ 官方授权码帮助](https://service.mail.qq.com/detail/0/1087)。
+在一封真实的 GLaDOS 验证码邮件中展开发件人，记下完整的发件地址（不要只复制显示名），
+并确认验证码格式。然后在仓库 **Settings → Secrets and variables → Actions** 配置：
+
+| 名称 | 类型 | 内容 |
+| --- | --- | --- |
+| `GLADOS_AUTH_MODE` | Variable | `email`，启用新模式 |
+| `GLADOS_EMAIL` | Secret | 你的 GLaDOS 登录邮箱地址 |
+| `QQ_IMAP_AUTH_CODE` | Secret | QQ 邮箱生成的客户端授权码 |
+| `GLADOS_MAIL_FROM` | Secret | 验证码邮件的完整发件地址，精确匹配 |
+| `QQ_IMAP_USERNAME` | Secret，可选 | QQ IMAP 登录邮箱；默认使用 `GLADOS_EMAIL`，别名登录时可单独指定 |
+| `GLADOS_CODE_REGEX` | Variable，可选 | 默认 `\b[0-9]{6}\b`；格式不同时按实际邮件修改 |
+| `GLADOS_MAIL_TIMEOUT_SECONDS` | Variable，可选 | 默认 180 秒，允许 15–600 秒 |
+
+若验证码是六位字母数字混合，可用带上下文的正则，例如
+`Access Code:\s*([A-Za-z0-9]{6})`，需要与邮件的实际文字一致。
+正则最多一个捕获组；存在多个不同的匹配结果时不提交，避免把其他数字当成验证码。
+
+配置后手动执行一次 **Run workflow** 验证完整登录与签到，之后继续沿用每天
+北京时间 09:00 唤醒、随机等待 0–90 分钟的原定时任务。脚本无需新增第三方依赖。
+已有失败邮件配置可以继续使用；它和读取验证码的 IMAP 配置相互独立。
+授权码只存入 Secrets，不要写进代码、提交到 Git 或粘贴到聊天里。
+
+脚本以只读方式打开 INBOX，使用 `BODY.PEEK[]` 获取邮件，不标记已读、不删除邮件。
+发送验证码前记录已有邮件 UID，并检查新邮件的服务器接收时间、发件人及 To 收件人；
+只接受发给 `GLADOS_EMAIL` 的邮件，因此转发导致 To 不匹配、垃圾箱收信或超时都会失败。
+邮箱授权码、验证码和 Cookie 不写入日志，也不上传登录页截图或浏览器会话。
+
+**自动化的实际边界**：当前前端支持 `captcha_required` 人机验证分支。
+遇到它、账号迁移、IMAP 授权码失效或站点继续拒绝自动签到时，脚本会停止并沿用失败通知，
+不会反复发送验证码。自动读邮箱能解决续登录与跨设备搬 Cookie 的问题，不能保证绕过所有
+站点风控。频繁要求人机验证时，更适合迁移到固定设备/服务器并保留浏览器登录状态；
+本次实现的 Actions 邮箱模式每次都会重新登录，未实现跨运行保存登录状态。
+
+本地测试使用设置好环境变量的终端执行 `python checkin.py --no-jitter --channel chrome`。
+邮箱模式下 `--dry-run` 会直接拒绝运行，防止只读检查意外发送验证码。
+本地 Python 必须具备正常的 SSL/TLS 支持；CI 使用 Python 3.12。
+
+以下章节描述原有 **Cookie 模式** 的配置与排查。
+
 ## 为什么改成浏览器点击
 
 2026 年 9 月改版后，GLaDOS 只认新版会话，并且**用浏览器算出的设备指纹校验"登录设备"**：

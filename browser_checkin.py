@@ -6,7 +6,7 @@
   用 requests 直连时，旧版 koa 会话或非浏览器指纹会直接得到
   {"code":-2,"message":"没有权限"}。
 
-本模块只负责"签到"这一个动作，退出码语义与 checkin.py 一致：
+支持导入 Cookie 或通过 QQ 邮箱验证码登录，退出码语义与 checkin.py 一致：
   0 成功或今日已签到，1 需要人工处理的致命错误，2 临时故障。
 """
 import argparse
@@ -18,6 +18,7 @@ import sys
 import time
 from datetime import datetime
 
+from email_login import QQMailbox, email_mode, login as login_with_email
 from glados_cookie import (
     BEIJING_TZ,
     FatalError,
@@ -431,11 +432,16 @@ def _load_sync_playwright():
 def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEMPTS,
         retry_delay=RETRY_DELAY_SECONDS, apply_jitter=True, channel=None):
     """打开浏览器完成签到，返回 (exit_code, CheckinResult)。"""
+    use_email = email_mode()
+    # dry-run 保持只读，不发送验证码。
+    if use_email and dry_run:
+        raise FatalError("邮箱模式的 --dry-run 不会申请验证码；请用 --no-jitter 测试完整登录签到。")
+    if use_email:
+        QQMailbox()  # 先校验配置，避免随机等待后才发现缺少邮箱参数；此处不连接邮箱。
     sync_playwright = _load_sync_playwright()
-
-    cookie = cookie_header or require_cookie()
-    kind = session_cookie_kind(cookie)
-    if kind != "gld":
+    cookie = None if use_email else (cookie_header or require_cookie())
+    kind = session_cookie_kind(cookie) if cookie else None
+    if not use_email and kind != "gld":
         log("WARNING: Cookie 未包含完整 gld:sess 与 gld:sess.sig，新版接口很可能会拒绝。")
 
     if apply_jitter and not dry_run:
@@ -466,25 +472,29 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
                 "locale": "zh-CN",
                 "timezone_id": "Asia/Shanghai",
             }
-            user_agent = _user_agent()
+            user_agent = None if use_email else _user_agent()
             if user_agent:
                 context_options["user_agent"] = user_agent
             context = browser.new_context(**context_options)
-            fingerprint = get_fingerprint()
+            fingerprint = "" if use_email else get_fingerprint()
             if fingerprint:
                 _install_fingerprint(context, fingerprint)
                 log(f"已注入设备指纹 {fingerprint[:12]}…（来源 GLADOS_FP，共 {len(fingerprint)} 字符）")
-            else:
+            elif not use_email:
                 log("WARNING: 未配置 GLADOS_FP，将使用 runner 实时计算的指纹；"
                     "服务端大概率返回 device-mismatch。请用 print_fingerprint.py 从登录设备导出。")
-            context.add_cookies(_cookie_list(cookie))
-            log(f"已注入 {len(parse_cookie_pairs(cookie))} 个 Cookie 字段（不显示值）。")
-            page = context.new_page()
-            # 诊断用：记录所有签到接口请求与浏览器弹窗，便于回看"点击到底发生了什么"。
-            page.on("request", _log_checkin_request)
-            page.on("dialog", lambda dialog: log(f"弹出对话框：{dialog.type} {dialog.message!r}"))
-            page.on("console", _log_console_message)
+            if cookie:
+                context.add_cookies(_cookie_list(cookie))
+                log(f"已注入 {len(parse_cookie_pairs(cookie))} 个 Cookie 字段（不显示值）。")
             try:
+                page = context.new_page()
+                if use_email:
+                    log("邮箱模式：使用当前浏览器生成的设备信息，忽略外部 Cookie、FP 和 UA。")
+                    login_with_email(page)
+                # 登录页可能打印验证码回复，仅在完成登录后注册日志。
+                page.on("request", _log_checkin_request)
+                page.on("dialog", lambda dialog: dialog.dismiss())
+                page.on("console", _log_console_message)
                 if dry_run:
                     return _dry_run(page)
                 result = _checkin_with_retry(page, max_attempts, retry_delay)
@@ -544,6 +554,9 @@ def _exit_code(status):
 
 def _fatal_hint(result):
     message = result.message or "签到失败"
+    if email_mode():
+        return ("邮箱模式已在同一浏览器内登录和签到。如仍出现设备校验或自动化拒绝，"
+                "自动重登未必能解决，请在固定设备上核实站点要求；不要反复申请验证码。")
     lowered = message.lower()
     if DEVICE_MISMATCH_MARKER in lowered or "登录设备" in message or "automated" in lowered:
         return (

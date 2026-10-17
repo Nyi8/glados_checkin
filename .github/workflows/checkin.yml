@@ -53,6 +53,14 @@ jobs:
         continue-on-error: true
         timeout-minutes: 140
         env:
+          # email 模式在当前浏览器登录后直接签到，不依赖手工导出的 Cookie/FP/UA。
+          GLADOS_AUTH_MODE: ${{ vars.GLADOS_AUTH_MODE }}
+          GLADOS_EMAIL: ${{ secrets.GLADOS_EMAIL }}
+          QQ_IMAP_USERNAME: ${{ secrets.QQ_IMAP_USERNAME }}
+          QQ_IMAP_AUTH_CODE: ${{ secrets.QQ_IMAP_AUTH_CODE }}
+          GLADOS_MAIL_FROM: ${{ secrets.GLADOS_MAIL_FROM }}
+          GLADOS_CODE_REGEX: ${{ vars.GLADOS_CODE_REGEX }}
+          GLADOS_MAIL_TIMEOUT_SECONDS: ${{ vars.GLADOS_MAIL_TIMEOUT_SECONDS }}
           GLADOS_COOKIE: ${{ secrets.GLADOS_COOKIE }}
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           # 登录设备的指纹；不配置时服务端会返回 code=4 / device-mismatch。
