@@ -117,7 +117,7 @@ class EmailTests(unittest.TestCase):
             self.assertEqual(email_login._is_response(response, "/api/login"), valid)
 
     def test_login_uses_verified_page_forms(self):
-        page = Mock()
+        page = Mock(url=email_login.ORIGIN + "/login")
         page.expect_response.return_value = FakeContextManager(FakeResponse({"code": 0}))
         mailbox = Mock(address=ENV["GLADOS_EMAIL"])
         mailbox.wait_for_code.return_value = "482731"
@@ -128,14 +128,93 @@ class EmailTests(unittest.TestCase):
         page.locator.assert_any_call("#mailcode")
         self.assertEqual(page.expect_response.call_count, 2)
         page.wait_for_url.assert_called_once()
+        self.assertEqual(page.goto.call_args.kwargs["wait_until"], "commit")
+        self.assertEqual(page.wait_for_url.call_args.kwargs["wait_until"], "commit")
+        self.assertEqual(page.remove_listener.call_count, 3)
 
     def test_no_mail_resend_and_no_sensitive_playwright_exception(self):
-        page = Mock()
+        page = Mock(url=email_login.ORIGIN + "/login")
         page.locator.return_value.fill.side_effect = RuntimeError("secret-code-482731")
         with patch.object(email_login, "QQMailbox") as box, self.assertRaises(RetryableError) as error:
             email_login.login(page)
         self.assertNotIn("482731", str(error.exception))
         box.return_value.__enter__.return_value.wait_for_code.assert_not_called()
+
+    def test_navigation_retry_happens_only_before_sending_code(self):
+        page = Mock(url=email_login.ORIGIN + "/login")
+        page.goto.side_effect = [TimeoutError("private-email@secret.example"), Mock(status=200)]
+        page.expect_response.return_value = FakeContextManager(FakeResponse({"code": 0}))
+        with patch.object(email_login, "QQMailbox") as box, patch.object(email_login.time, "sleep"):
+            mailbox = box.return_value.__enter__.return_value
+            mailbox.address = ENV["GLADOS_EMAIL"]
+            mailbox.wait_for_code.return_value = "482731"
+            email_login.login(page)
+        self.assertEqual(page.goto.call_count, 2)
+        self.assertEqual(page.expect_response.call_count, 2)  # 一次发码、一次登录。
+        mailbox.wait_for_code.assert_called_once()
+
+    def test_navigation_exhausted_reports_stage_without_sending_code(self):
+        page = Mock(url=email_login.ORIGIN + "/login?private-token=secret")
+        page.goto.side_effect = TimeoutError("482731 private-token=secret net::ERR_CONNECTION_TIMED_OUT")
+        with patch.object(email_login, "QQMailbox"), patch.object(email_login.time, "sleep"), \
+                self.assertRaises(RetryableError) as caught:
+            email_login.login(page)
+        message = str(caught.exception)
+        self.assertIn("打开登录页", message)
+        self.assertIn("net::ERR_CONNECTION_TIMED_OUT", message)
+        self.assertNotIn("482731", message)
+        self.assertNotIn("private-token", message)
+        self.assertEqual(page.goto.call_count, 2)
+        page.expect_response.assert_not_called()
+        self.assertEqual(page.remove_listener.call_count, 3)
+
+    def test_missing_form_reports_frontend_stage(self):
+        page = Mock(url=email_login.ORIGIN + "/login")
+        page.goto.return_value = Mock(status=200, url=email_login.ORIGIN + "/login")
+        page.locator.return_value.wait_for.side_effect = TimeoutError()
+        with patch.object(email_login.time, "sleep"), self.assertRaises(RetryableError) as caught:
+            email_login._open_login_page(page, email_login._LoginDiagnostics(page))
+        self.assertIn("等待邮箱输入框", str(caught.exception))
+        self.assertIn('"login-document": 200', str(caught.exception))
+        page.locator.return_value.fill.assert_not_called()
+
+    def test_blocked_document_is_not_retried(self):
+        page = Mock(url=email_login.ORIGIN + "/login")
+        page.goto.return_value = Mock(status=403, url=page.url)
+        with self.assertRaises(FatalError):
+            email_login._open_login_page(page, email_login._LoginDiagnostics(page))
+        page.goto.assert_called_once()
+        page.locator.assert_not_called()
+
+    def test_send_code_timeout_does_not_retry_and_reports_stage(self):
+        page = Mock(url=email_login.ORIGIN + "/login")
+        page.expect_response.return_value = FakeContextManager(error=TimeoutError("sensitive-482731"))
+        with patch.object(email_login, "QQMailbox") as box, self.assertRaises(RetryableError) as caught:
+            email_login.login(page)
+        page.goto.assert_called_once()
+        page.expect_response.assert_called_once()
+        box.return_value.__enter__.return_value.wait_for_code.assert_not_called()
+        self.assertIn("申请验证码", str(caught.exception))
+        self.assertNotIn("482731", str(caught.exception))
+
+    def test_redirect_does_not_receive_email_or_code(self):
+        page = Mock(url="https://other.example/login")
+        with self.assertRaises(FatalError):
+            email_login._open_login_page(page, email_login._LoginDiagnostics(page))
+        page.locator.return_value.fill.assert_not_called()
+
+    def test_diagnostics_do_not_include_urls_or_javascript_messages(self):
+        diagnostics = email_login._LoginDiagnostics(Mock(url="https://glados.cloud/login?code=482731"))
+        diagnostics._response(Mock(url=email_login.ORIGIN + "/app.bundle.js", status=503))
+        diagnostics._failed(Mock(url="https://other.example/private?code=482731",
+                                 failure="private 482731 net::ERR_CONNECTION_RESET"))
+        diagnostics._page_error(RuntimeError("private code 482731"))
+        summary = diagnostics.summary()
+        self.assertIn('"app-script": 503', summary)
+        self.assertIn("net::ERR_CONNECTION_RESET", summary)
+        self.assertIn('"script_errors": 1', summary)
+        for private in ("482731", "other.example", "private"):
+            self.assertNotIn(private, summary)
 
     def test_main_needs_no_external_cookie(self):
         with patch.object(browser_checkin, "run", return_value=(0, browser_checkin.CheckinResult("success"))), \
