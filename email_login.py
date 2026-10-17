@@ -178,13 +178,36 @@ def _is_response(response, path):
             and response.request.method.upper() == "POST")
 
 
+class _UnreadableReply(RetryableError):
+    """无法解析响应；需要区分格式错误与跳转后响应体丢失。"""
+
+
+def _reply_metadata(response):
+    """不记录响应正文、Set-Cookie、Location 或任意原始响应头。"""
+    try:
+        raw_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+    except Exception:
+        raw_type = ""
+    content_type = raw_type if raw_type in (
+        "application/json", "text/json", "text/html", "text/plain", "application/octet-stream"
+    ) else "other/unknown"
+    return f"HTTP {response.status}，Content-Type={content_type}"
+
+
 def _check_reply(response):
+    metadata = _reply_metadata(response)
+    log(f"认证接口响应：{metadata}。")
+    # 必须先判断 HTTP 状态，不能把 HTML 限流/错误页当成 JSON 解析故障。
+    if response.status == 429 or response.status >= 500:
+        raise RetryableError(f"认证接口限流或暂不可用（{metadata}），本次不重复申请验证码。")
+    if response.status >= 400:
+        raise FatalError(f"认证接口拒绝请求（{metadata}），请检查站点登录要求。")
     try:
         data = response.json()
-    except Exception as exc:
-        raise RetryableError("登录接口返回非 JSON 内容。") from exc
-    if response.status == 429 or response.status >= 500:
-        raise RetryableError("登录接口限流或暂不可用，本次不重复申请验证码。")
+    except ValueError:
+        raise _UnreadableReply(f"认证接口响应格式不是有效 JSON（{metadata}）。") from None
+    except Exception:
+        raise _UnreadableReply(f"认证接口响应体无法读取，可能已发生页面跳转（{metadata}）。") from None
     if not isinstance(data, dict):
         raise RetryableError("登录接口回复格式异常。")
     if data.get("captcha_required"):
@@ -192,6 +215,61 @@ def _check_reply(response):
     if response.status >= 400 or data.get("code") != 0:
         # 站点回复可能包含验证码/登录信息，不直接输出。
         raise FatalError("GLaDOS 拒绝邮箱登录；请检查账号、验证码格式或账号迁移状态。")
+
+
+CONSOLE_URL = re.compile(r"^https://glados\.cloud/console(?:/[^?#]*)?(?:[?#].*)?$")
+
+
+def _verify_session(page):
+    """在当前浏览器复核服务端会话，沿用站点本次生成的指纹；只返回非敏感状态。"""
+    parsed = urlsplit(page.url)
+    if (parsed.scheme != "https" or parsed.netloc != "glados.cloud" or
+            not (parsed.path == "/console" or parsed.path.startswith("/console/"))):
+        raise RetryableError("尚未进入本站控制台，未确认有效登录态。")
+    result = page.evaluate("""async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
+        const fp = window.localStorage.getItem('glados.fp.v1');
+        if (!/^fp1\\.[0-9a-f]{16,64}$/.test(fp || '')) return {status: 0, code: null};
+        const response = await fetch('/api/user/session', {
+          credentials: 'same-origin',
+          headers: {'Accept': 'application/json', 'Authorization': fp},
+          signal: controller.signal
+        });
+        let payload;
+        try { payload = await response.json(); } catch (_) { return {status: response.status, code: null}; }
+        return {status: response.status,
+                code: payload && typeof payload.code === 'number' ? payload.code : null};
+      } catch (_) { return {status: 0, code: null}; }
+      finally { clearTimeout(timer); }
+    }""")
+    status = result.get("status") if isinstance(result, dict) else None
+    code = result.get("code") if isinstance(result, dict) else None
+    status = status if type(status) is int else None
+    code = code if type(code) is int else None
+    log(f"登录态复核：HTTP {status if status is not None else 'unknown'}，code={code}。")
+    if status is None or not 200 <= status < 300 or code != 0:
+        raise RetryableError("登录后未确认有效服务端会话，停止本次签到。")
+
+
+def _finish_login(page, response, diagnostics):
+    unreadable = None
+    try:
+        _check_reply(response)
+    except _UnreadableReply as exc:
+        unreadable = str(exc)
+        log(f"{unreadable} 将复核控制台跳转与服务端会话，不重复提交验证码。")
+    # 明确的 HTTP/JSON 拒绝与人机验证不会进入兜底。
+    diagnostics.stage = "等待登录跳转"
+    try:
+        page.wait_for_url(CONSOLE_URL, wait_until="commit", timeout=15_000 if unreadable else 45_000)
+        _verify_session(page)
+    except Exception as exc:
+        if unreadable:
+            raise RetryableError(f"{unreadable} 未能通过登录态复核；{diagnostics.summary()}；"
+                                 f"{_network_error(exc)}；本次不重复提交验证码。") from None
+        raise
 
 
 def _network_error(error):
@@ -327,9 +405,7 @@ def login(page):
             with page.expect_response(lambda r: _is_response(r, "/api/login"),
                                       timeout=45_000) as reply:
                 page.get_by_role("button", name="Login", exact=True).click()
-            _check_reply(reply.value)
-            diagnostics.stage = "等待登录跳转"
-            page.wait_for_url(ORIGIN + "/console**", wait_until="commit", timeout=45_000)
+            _finish_login(page, reply.value, diagnostics)
             log("邮箱登录成功，将在当前浏览器中签到。")
         except (FatalError, RetryableError):
             raise

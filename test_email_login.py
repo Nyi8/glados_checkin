@@ -121,7 +121,7 @@ class EmailTests(unittest.TestCase):
         page.expect_response.return_value = FakeContextManager(FakeResponse({"code": 0}))
         mailbox = Mock(address=ENV["GLADOS_EMAIL"])
         mailbox.wait_for_code.return_value = "482731"
-        with patch.object(email_login, "QQMailbox") as box:
+        with patch.object(email_login, "QQMailbox") as box, patch.object(email_login, "_verify_session") as verify:
             box.return_value.__enter__.return_value = mailbox
             email_login.login(page)
         page.locator.assert_any_call("#email")
@@ -131,6 +131,7 @@ class EmailTests(unittest.TestCase):
         self.assertEqual(page.goto.call_args.kwargs["wait_until"], "commit")
         self.assertEqual(page.wait_for_url.call_args.kwargs["wait_until"], "commit")
         self.assertEqual(page.remove_listener.call_count, 3)
+        verify.assert_called_once_with(page)
 
     def test_no_mail_resend_and_no_sensitive_playwright_exception(self):
         page = Mock(url=email_login.ORIGIN + "/login")
@@ -144,7 +145,8 @@ class EmailTests(unittest.TestCase):
         page = Mock(url=email_login.ORIGIN + "/login")
         page.goto.side_effect = [TimeoutError("private-email@secret.example"), Mock(status=200)]
         page.expect_response.return_value = FakeContextManager(FakeResponse({"code": 0}))
-        with patch.object(email_login, "QQMailbox") as box, patch.object(email_login.time, "sleep"):
+        with patch.object(email_login, "QQMailbox") as box, patch.object(email_login.time, "sleep"), \
+                patch.object(email_login, "_verify_session"):
             mailbox = box.return_value.__enter__.return_value
             mailbox.address = ENV["GLADOS_EMAIL"]
             mailbox.wait_for_code.return_value = "482731"
@@ -215,6 +217,79 @@ class EmailTests(unittest.TestCase):
         self.assertIn('"script_errors": 1', summary)
         for private in ("482731", "other.example", "private"):
             self.assertNotIn(private, summary)
+
+    def test_http_errors_are_classified_before_reading_json(self):
+        for status, exception in ((403, FatalError), (429, RetryableError), (503, RetryableError)):
+            response = Mock(status=status, headers={"content-type": "text/html"})
+            response.json.side_effect = ValueError("private body 482731")
+            with self.assertRaises(exception) as caught:
+                email_login._check_reply(response)
+            self.assertIn(f"HTTP {status}", str(caught.exception))
+            self.assertNotIn("482731", str(caught.exception))
+            response.json.assert_not_called()
+
+    def test_unavailable_body_is_distinguished_from_invalid_json(self):
+        for error, marker in ((ValueError("private-code"), "不是有效 JSON"),
+                              (RuntimeError("No resource with given identifier found private-code"), "响应体无法读取")):
+            response = Mock(status=200, headers={"content-type": "application/json; charset=utf-8"})
+            response.json.side_effect = error
+            with self.assertRaises(email_login._UnreadableReply) as caught:
+                email_login._check_reply(response)
+            self.assertIn(marker, str(caught.exception))
+            self.assertIn("application/json", str(caught.exception))
+            self.assertNotIn("private-code", str(caught.exception))
+
+    def test_response_metadata_excludes_sensitive_headers(self):
+        response = Mock(status=302, headers={"content-type": "text/html; charset=private",
+                                             "set-cookie": "secret", "location": "/console?token=secret"})
+        self.assertEqual(email_login._reply_metadata(response), "HTTP 302，Content-Type=text/html")
+
+    def test_body_unavailable_is_accepted_only_after_session_verification(self):
+        page = Mock(url=email_login.ORIGIN + "/console")
+        response = Mock(status=200, headers={"content-type": "application/json"})
+        response.json.side_effect = RuntimeError("body lost after navigation")
+        with patch.object(email_login, "_verify_session") as verify:
+            email_login._finish_login(page, response, email_login._LoginDiagnostics(page))
+        verify.assert_called_once_with(page)
+        page.wait_for_url.assert_called_once()
+
+    def test_html_response_without_valid_session_still_fails(self):
+        page = Mock(url=email_login.ORIGIN + "/console")
+        response = Mock(status=200, headers={"content-type": "text/html"})
+        response.json.side_effect = ValueError()
+        with patch.object(email_login, "_verify_session", side_effect=RetryableError("not authenticated")), \
+                self.assertRaises(RetryableError):
+            email_login._finish_login(page, response, email_login._LoginDiagnostics(page))
+
+    def test_explicit_json_rejection_and_captcha_never_use_session_fallback(self):
+        page = Mock(url=email_login.ORIGIN + "/console")
+        for payload in ({"code": -1}, {"code": 0, "captcha_required": True}):
+            with patch.object(email_login, "_verify_session") as verify, self.assertRaises(FatalError):
+                email_login._finish_login(page, FakeResponse(payload), email_login._LoginDiagnostics(page))
+            verify.assert_not_called()
+        page.wait_for_url.assert_not_called()
+
+    def test_session_requires_console_origin_and_backend_success(self):
+        page = Mock(url=email_login.ORIGIN + "/console/checkin")
+        page.evaluate.return_value = {"status": 200, "code": 0}
+        email_login._verify_session(page)
+        script = page.evaluate.call_args.args[0]
+        self.assertIn("/api/user/session", script)
+        self.assertIn("glados.fp.v1", script)
+        self.assertIn("'Authorization': fp", script)
+        for result in ({"status": 200, "code": -2}, {"status": 403, "code": 0},
+                       {"status": 200, "code": None}, {"status": 0, "code": None},
+                       {"status": 200, "code": False}):
+            page.evaluate.return_value = result
+            with self.assertRaises(RetryableError):
+                email_login._verify_session(page)
+        for url in (email_login.ORIGIN + "/login", "https://other.example/console",
+                    email_login.ORIGIN + "/console-fake"):
+            page.url = url
+            page.evaluate.reset_mock()
+            with self.assertRaises(RetryableError):
+                email_login._verify_session(page)
+            page.evaluate.assert_not_called()
 
     def test_main_needs_no_external_cookie(self):
         with patch.object(browser_checkin, "run", return_value=(0, browser_checkin.CheckinResult("success"))), \

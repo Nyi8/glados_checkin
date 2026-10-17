@@ -48,6 +48,11 @@ jobs:
       - name: Verify script (offline unit tests)
         run: python -B -m unittest -q
 
+      - name: Verify login redirect handling (isolated browser test)
+        env:
+          GLADOS_BROWSER_TESTS: "1"
+        run: python -B -m unittest -q test_login_redirect
+
       - name: Run checkin script
         id: checkin
         continue-on-error: true
