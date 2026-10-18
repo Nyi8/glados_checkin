@@ -1,18 +1,15 @@
-"""在**登录 GLaDOS 的那台电脑**上导出设备指纹，供 Actions 复用。
+"""独立测试浏览器的设备指纹探测，不是现有登录浏览器的指纹导出工具。
 
-原理：GLaDOS 前端把指纹缓存在 localStorage["glados.fp.v1"]，并作为
-Authorization 请求头发给所有 API；服务端据此校验"登录设备"。
-Actions 的 runner 是 Linux 无 GPU 环境，自己算出来的指纹必然与登录设备不一致，
-于是返回 code=4 / device-mismatch。把这里的值交给 GLADOS_FP 即可对上。
+本工具创建全新浏览器上下文，不能读取平时 Chrome 中已有的登录缓存。
+实际配置请在已登录 GLaDOS 网页的控制台执行：
+localStorage.getItem('glados.fp.v1')；User-Agent 用 navigator.userAgent 读取。
 
 用法（本机、会打开一个浏览器窗口）：
     pwsh -File setup_env.ps1
     & .venv\\Scripts\\python.exe print_fingerprint.py            # 显示指纹
     & .venv\\Scripts\\python.exe print_fingerprint.py fp.txt      # 同时写入文件
 
-拿到 fp1.xxxxxxxx 后，两种用法任选：
-  A. 存到仓库 Secret：Settings → Secrets → Actions → GLADOS_FP
-  B. 存成本地文件，本地/自建 runner 用 GLADOS_FP_FILE 指向它
+输出值仅属于独立测试浏览器，不能与其他浏览器的 Cookie 混用。
 """
 import argparse
 import os
@@ -32,7 +29,7 @@ def _load_sync_playwright():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="导出当前浏览器的 GLaDOS 设备指纹")
+    parser = argparse.ArgumentParser(description="探测独立测试浏览器的 GLaDOS 设备指纹")
     parser.add_argument("output", nargs="?", default=None, help="可选：把指纹写入该文件")
     parser.add_argument("--channel", default=None, help="使用已安装的浏览器通道（chrome / msedge）")
     parser.add_argument("--timeout", type=int, default=60, help="等待站点写入指纹的秒数")
@@ -46,7 +43,8 @@ def main(argv=None):
 
     channel = get_env("GLADOS_BROWSER_CHANNEL") or args.channel or ""
     user_agent = get_env("GLADOS_USER_AGENT")
-    log(f"打开 {ORIGIN}（headless=False，headless 下算出的指纹与真实浏览器不同）")
+    log("注意：此工具创建新浏览器，不能读取原已登录浏览器的指纹。配置请使用原网页控制台。")
+    log(f"打开 {ORIGIN}（独立测试浏览器，headless=False）")
     with sync_playwright() as playwright:
         launch_kwargs = {"headless": False, "args": ["--disable-blink-features=AutomationControlled"]}
         if channel:
@@ -87,7 +85,7 @@ def main(argv=None):
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(fingerprint + "\n")
         log(f"已写入文件 {args.output}（可作为 GLADOS_FP_FILE）")
-    log("把它保存为仓库 Secret GLADOS_FP，然后重新 Run workflow。")
+    log("以上仅为测试浏览器的探测值；不要与其他浏览器导出的 Cookie 混用。")
     return 0
 
 

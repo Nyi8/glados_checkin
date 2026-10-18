@@ -126,6 +126,16 @@ class RequireCookieTests(unittest.TestCase):
                 self.assertRaises(cookie_util.FatalError):
             cookie_util.require_cookie()
 
+    def test_complete_koa_cookie_is_allowed_and_validity_is_left_to_server(self):
+        cookie = header(("koa:sess", KOA_SESS), ("koa:sess.sig", KOA_SIG))
+        with patch.dict("os.environ", {"GLADOS_COOKIE": cookie}):
+            self.assertEqual(cookie_util.require_cookie(), cookie)
+
+    def test_partial_and_truncated_sessions_are_rejected(self):
+        for cookie in ("koa:sess=" + KOA_SESS, "koa:sess=abc; koa:sess.sig=def"):
+            with patch.dict("os.environ", {"GLADOS_COOKIE": cookie}), self.assertRaises(cookie_util.FatalError):
+                cookie_util.require_cookie()
+
 
 if __name__ == "__main__":
     unittest.main()

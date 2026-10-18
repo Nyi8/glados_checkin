@@ -1,175 +1,99 @@
-# GLaDOS 自动签到（真实浏览器点击版）
+# GLaDOS 自动签到（Cookie 接口 / 浏览器）
 
-用 GitHub Actions 在北京时间 **09:00–10:30** 之间的随机时刻启动，
-启动后立即用真实 Chromium 打开签到页并点击签到，**不再让 runner 随机空等**。
-每次运行结束后生成下一次的随机时间，保存到 `config/schedule.json`，并同步更新工作流 cron。
+默认复用已有 Cookie，通过 GitHub Actions 在北京时间 **09:00–10:30** 的随机时刻启动并立即签到。
+每次结束后生成下一次时间，保存到 `config/schedule.json` 并同步工作流 cron，不让 runner 随机空等。
+随机排程需要配置下文的 `SCHEDULE_TOKEN`；它与 GLaDOS 登录凭据相互独立。
 
-## 推荐方案：QQ 邮箱验证码自动登录
+## 推荐：复用 Cookie 调用签到接口
 
-设置 `GLADOS_AUTH_MODE=email` 后，每次任务在 **Actions 自己启动的同一个浏览器**里：
+参考 [pyx13638516490/glados_checkin 的接口流程](https://github.com/pyx13638516490/glados_checkin/blob/main/checkin.py)，
+本项目提供 Cookie API 模式，向 `https://glados.cloud/api/user/checkin` 发送
+`{"token":"glados.cloud"}`，验证响应后查询会员天数与积分。此模式不重新登录、不申请邮箱验证码，
+也不安装或启动 Chromium；临时网络故障最多重试一次，业务拒绝不会盲目重发。
+仅请求 `glados.cloud`，不自动把 Cookie 转发到其他域名。
 
-1. 通过 GLaDOS 登录页的 `Get Code` 申请验证码；
-2. 通过 QQ IMAP TLS 读取本次申请后收到的验证码邮件；
-3. 在登录页输入验证码并点击 `Login`；
-4. 直接用这个浏览器完成签到，结束后销毁浏览器会话。
+登录风控与已有会话签到是不同步骤：邮箱发码接口返回 `captcha_required`，
+只说明本次申请验证码需要人机验证；有效 Cookie 可以复用已有登录态。
+这不保证 Cookie 永不过期，也不保证签到接口永远不要求验证；服务端明确拒绝时会停止。
 
-Cookie 和站点生成的设备指纹都来自本次运行，避免把电脑上的 Cookie 搬到另一台设备。
-邮箱模式忽略 `GLADOS_COOKIE`、`GLADOS_FP`、`GLADOS_USER_AGENT`、`GLADOS_FP_FILE`；
-原 Cookie 模式仍是默认值，不更改配置就保持原有行为。
+仓库 **Settings → Secrets and variables → Actions** 中设置：
 
-**一次性配置**：
-
-先在 [QQ 邮箱](https://mail.qq.com/) 设置中开启 IMAP/SMTP 服务，生成客户端授权码。
-这里使用的是**邮箱授权码**，不是 QQ 密码，也不是 GLaDOS 发来的临时验证码。
-可参阅 [QQ 官方授权码帮助](https://service.mail.qq.com/detail/0/1087)。
-在一封真实的 GLaDOS 验证码邮件中展开发件人，记下完整的发件地址（不要只复制显示名），
-并确认验证码格式。然后在仓库 **Settings → Secrets and variables → Actions** 配置：
-
-| 名称 | 类型 | 内容 |
+| 名称 | 类型 | 值 |
 | --- | --- | --- |
-| `GLADOS_AUTH_MODE` | Variable | `email`，启用新模式 |
-| `GLADOS_EMAIL` | Secret | 你的 GLaDOS 登录邮箱地址 |
-| `QQ_IMAP_AUTH_CODE` | Secret | QQ 邮箱生成的客户端授权码 |
-| `GLADOS_MAIL_FROM` | Secret | 验证码邮件的完整发件地址，精确匹配 |
-| `QQ_IMAP_USERNAME` | Secret，可选 | QQ IMAP 登录邮箱；默认使用 `GLADOS_EMAIL`，别名登录时可单独指定 |
-| `GLADOS_CODE_REGEX` | Variable，可选 | 默认 `\b[0-9]{6}\b`；格式不同时按实际邮件修改 |
-| `GLADOS_MAIL_TIMEOUT_SECONDS` | Variable，可选 | 默认 180 秒，允许 15–600 秒 |
+| `GLADOS_AUTH_MODE` | Variable | `cookie`；从邮箱模式切换时必须修改原来的 `email` |
+| `GLADOS_CHECKIN_METHOD` | Variable，可选 | `api`（默认）；`browser` 则复用 Cookie 用浏览器点击 |
+| `GLADOS_COOKIE` | Secret | 已登录浏览器中复制的完整 Cookie 请求头 |
+| `GLADOS_CHECKIN_TOKEN` | Variable，可选 | 默认 `glados.cloud`；旧值 `glados.one` 会自动纠正 |
+| `GLADOS_FP` | Secret，可选 | 仅在需要设备校验时填写同一已登录浏览器的真实缓存指纹 |
+| `GLADOS_USER_AGENT` | Variable，可选 | 同一登录浏览器的完整 User-Agent |
 
-若验证码是六位字母数字混合，可用带上下文的正则，例如
-`Access Code:\s*([A-Za-z0-9]{6})`，需要与邮件的实际文字一致。
-正则最多一个捕获组；存在多个不同的匹配结果时不提交，避免把其他数字当成验证码。
+Cookie 获取步骤：
 
-配置后手动执行一次 **Run workflow** 验证完整登录与签到；配置下文的 `SCHEDULE_TOKEN` 后，
-即可每天在随机时刻启动并立即签到。脚本无需新增第三方依赖。
-已有失败邮件配置可以继续使用；它和读取验证码的 IMAP 配置相互独立。
-授权码只存入 Secrets，不要写进代码、提交到 Git 或粘贴到聊天里。
+1. 用你平时的浏览器打开 [GLaDOS](https://glados.cloud)，手动完成登录及站点要求的人机验证。
+2. F12 → **Network**，刷新控制台，点开一次成功的 `/api/user/status` 或 `/api/user/session` 请求。
+3. 在 **Request Headers → Cookie** 中复制完整值（不要复制 `Set-Cookie`），保存为 `GLADOS_COOKIE`。
+4. 保留该请求中实际出现的所有字段。完整 `gld:sess` / `gld:sess.sig` 或完整 `koa:sess` / `koa:sess.sig`
+   都允许提交，不能只根据字段名称判断是否过期；是否有效由服务端回复决定。
+5. 同步最新代码后手动 **Run workflow**，确认日志出现 `Cookie 接口模式` 和明确的签到成功回复。
 
-脚本以只读方式打开 INBOX，使用 `BODY.PEEK[]` 获取邮件，不标记已读、不删除邮件。
-发送验证码前记录已有邮件 UID，并检查新邮件的服务器接收时间、发件人及 To 收件人；
-只接受发给 `GLADOS_EMAIL` 的邮件，因此转发导致 To 不匹配、垃圾箱收信或超时都会失败。
-邮箱授权码、验证码和 Cookie 不写入日志，也不上传登录页截图或浏览器会话。
+Cookie 支持完整单行请求头、带 `Cookie:` 前缀、外层引号或单域名 Cookie-Editor JSON。
+签名值不做 HTML/URL 解码，完整请求头不重排、不丢字段；缺少完整会话或明显复制截断会报错。
+Cookie 是登录凭据，只保存到 Secret，不提交到仓库，也不要贴到聊天中。
+Cookie 失效后需要在浏览器重新登录、更新 Secret；脚本不会静默切回邮箱模式反复申请验证码。
 
-**自动化的实际边界**：当前前端支持 `captcha_required` 人机验证分支。
-遇到它、账号迁移、IMAP 授权码失效或站点继续拒绝自动签到时，脚本会停止并沿用失败通知，
-不会反复发送验证码。自动读邮箱能解决续登录与跨设备搬 Cookie 的问题，不能保证绕过所有
-站点风控。频繁要求人机验证时，更适合迁移到固定设备/服务器并保留浏览器登录状态；
-本次实现的 Actions 邮箱模式每次都会重新登录，未实现跨运行保存登录状态。
+若接口明确返回 **`device-mismatch`**，在**刚才导出 Cookie 的已登录网页**控制台读取：
 
-本地测试使用设置好环境变量的终端执行 `python checkin.py --no-jitter --channel chrome`。
-邮箱模式下 `--dry-run` 会直接拒绝运行，防止只读检查意外发送验证码。
-本地 Python 必须具备正常的 SSL/TLS 支持；CI 使用 Python 3.12。
-
-邮箱模式排查：
-
-| 日志 | 含义与处理 |
-| --- | --- |
-| `QQ IMAP 已登录并以只读方式打开收件箱` | 本次邮箱授权码已通过验证，不需要因为后续网页超时重新生成授权码 |
-| `stage: 打开登录页`、`net::ERR_CONNECTION_TIMED_OUT` | 运行机器到 GLaDOS 的页面访问失败；脚本在发码前最多尝试两次 |
-| `stage: 等待邮箱输入框` | 主文档已经响应，但登录表单未就绪；检查诊断中的 `app-script`、`session-api` 状态和 `script_errors` |
-| `stage: 申请验证码` | 点击 Get Code 或等待发码接口失败；为避免重复发送验证码，不自动重试 |
-| `stage: 提交登录` / `等待登录跳转` | 已进入提交验证码阶段；查看登录接口或跳转是否完成 |
-| `响应体无法读取，可能已发生页面跳转` | 浏览器跳转后原响应体可能不可用；脚本将复核控制台跳转与服务端会话，不重复提交验证码 |
-| `登录态复核：HTTP 200，code=0` | 服务端已确认当前浏览器会话有效，随后才继续签到 |
-| `未配置完整 SMTP，跳过失败邮件` | 只表示未启用失败邮件通知，与 QQ IMAP 收验证码是否可用无关 |
-
-登录页导航只等待主文档响应（`commit`），随后单独等待邮箱输入框可见，
-避免其他延迟加载的资源拖住 `DOMContentLoaded`。诊断只记录阶段、固定资源分类、
-HTTP 状态、浏览器网络错误码和脚本报错数量；不记录登录页正文、查询串、验证码或截图。
-当前运行仍因访问限制或网络连接失败而停止时，需要根据这些诊断确认运行环境；
-不能把一次超时直接认定为邮箱授权码错误。
-
-认证接口会记录 HTTP 状态和经过筛选的 Content-Type，先识别 403、429 和 5xx，
-再解析 JSON。提交验证码后，如果响应体不可读取或不是有效 JSON，只有在跳转到本站
-控制台且使用当前 Cookie 与站点生成的设备指纹查询 `/api/user/session` 返回成功时，
-才认定登录成功。明确的 JSON 拒绝和人机验证回复不会进入这个兜底分支。
-工作流另有隔离浏览器回归测试，拦截全部请求验证跳转与会话校验，不使用任何账号凭据。
-
-以下章节描述原有 **Cookie 模式** 的配置与排查。
-
-## 为什么改成浏览器点击
-
-2026 年 9 月改版后，GLaDOS 只认新版会话，并且**用浏览器算出的设备指纹校验"登录设备"**：
-
-| 现象 | 原因 |
-| --- | --- |
-| `{"code":-2,"message":"没有权限"}` | 旧版 `koa:sess` 会话、或 Cookie 不完整 |
-| `code=4 / reason=device-mismatch`<br>`Automated check-in detected` | **设备指纹对不上**（见下） |
-| 用 requests 直连总失败 | 缺少真实浏览器的 TLS 指纹、`Sec-CH-UA`、站点自身请求头 |
-
-### 设备指纹是什么（关键）
-
-前端 `app.bundle.js` 里有一段指纹代码，把所有 API 请求都带上：
-
-```js
-xt.interceptors.request.use(e => (Cl && (e.headers.Authorization = Cl), e));
-// Cl = localStorage["glados.fp.v1"] || "fp1." + SHA256(7 段特征)[:48]
+```javascript
+localStorage.getItem('glados.fp.v1') // 完整结果存为 Secret GLADOS_FP
+navigator.userAgent                // 完整结果存为 Variable GLADOS_USER_AGENT
 ```
 
-7 段特征依次是：`v1`、canvas 渲染哈希、WebGL 厂商/渲染器哈希、
-`屏幕宽x高x色深xDPR`、`时区/1月与7月时区偏移`、
-`language|languages|platform|硬件线程|deviceMemory|maxTouchPoints|cookieEnabled`、
-localStorage 可用性。算出来缓存在 localStorage，键名 `glados.fp.v1`。
+三个值来自同一登录浏览器。`print_fingerprint.py` 会新建独立浏览器，不能导出你原浏览器
+已有的登录缓存，因此其探测值不能与原浏览器 Cookie 混用。
+`没有权限` 本身不能证明 TLS/浏览器指纹有问题，更不能据此认定所有 koa Cookie 已失效。
+旧版 `diag_status.py` 曾漏发 Cookie，会造成“没有权限”的误判；现已补齐请求头并加入回归测试。
 
-你的浏览器里存的是"登录那台机器"的指纹，服务端认；而 Actions 的 runner 是
-Linux、无 GPU、无中文字体，实时算出来的 canvas/WebGL/platform 全都不一样，
-于是稳定返回 `device-mismatch`。**所以必须把登录设备的指纹导出来喂给脚本。**
+## 可选：QQ 邮箱验证码登录
 
-本仓库旧版直接用 `requests` POST `/api/user/checkin`，实测与「不带 Cookie 请求」
-返回完全相同的 `没有权限`。现在的方案改成：
+需要邮箱模式时将 `GLADOS_AUTH_MODE` 设为 `email`。运行时通过浏览器申请验证码、
+用 QQ IMAP 读取、在同一浏览器完成登录与签到；这个模式每次都会重新登录。
+站点要求人机验证时脚本会停止，需要人工处理，不会自动解决验证码挑战。
 
-1. 用 Playwright 启动真实 Chromium（`--headless=new`）；
-2. 注入完整 Cookie + 登录设备的指纹，打开 `https://glados.cloud/console/checkin`；
-3. 定位站点自己的签到按钮 `button.checkin-cute-btn` 并**真的点击**；
-4. 抓取站点发出的 `/api/user/checkin` 真实响应判定结果，再读取会员天数与积分。
-
-## 前置条件（必须手动做一次）
-
-在**登录 GLaDOS 的那台**电脑上：
-
-1. 拉取本仓库并准备隔离环境：`pwsh -File setup_env.ps1`；
-2. 打开 <https://glados.cloud> 退出后**重新登录**；
-3. F12 → Network → 刷新 → 点开一次成功的 `/api/user/status`；
-4. 在 **Request Headers → Cookie** 里右键复制**完整的一行值**，确认同时包含
-   `gld:sess=` 与 `gld:sess.sig=`；
-5. 导出设备指纹（会弹出一个浏览器窗口，请保持它开着几秒）：
-
-   ~~~powershell
-   & .venv\Scripts\python.exe print_fingerprint.py
-   ~~~
-6. 访问 `chrome://version`，复制**完整的「用户代理 / User-Agent」**；
-7. 到仓库 **Settings → Secrets and variables → Actions**：
+在 [QQ 邮箱](https://mail.qq.com/) 设置中开启 IMAP/SMTP 服务并生成客户端授权码，
+按 [QQ 官方说明](https://help.mail.qq.com/detail/106/985) 操作。配置：
 
 | 名称 | 类型 | 内容 |
 | --- | --- | --- |
-| `GLADOS_COOKIE` | Secret | 第 4 步复制的完整 Cookie |
-| `GLADOS_FP` | Secret | 第 5 步输出的 `fp1.…` |
-| `GLADOS_USER_AGENT` | Variable | 第 6 步复制的完整 User-Agent |
+| `GLADOS_EMAIL` | Secret | GLaDOS 登录邮箱，即验证码收件地址 |
+| `QQ_IMAP_AUTH_CODE` | Secret | QQ 邮箱客户端授权码，不是 QQ 密码或临时验证码 |
+| `GLADOS_MAIL_FROM` | Secret | 验证码邮件 From 中的完整发件地址，不是你自己的收件邮箱 |
+| `QQ_IMAP_USERNAME` | Secret，可选 | QQ IMAP 登录邮箱，默认使用 `GLADOS_EMAIL` |
+| `GLADOS_CODE_REGEX` | Variable，可选 | 默认 `\b[0-9]{6}\b`，六位纯数字无需另填 |
+| `GLADOS_MAIL_TIMEOUT_SECONDS` | Variable，可选 | 默认 180 秒，允许 15–600 秒 |
 
-三项都来自同一个浏览器才会一致：**Cookie + 指纹 + UA 必须同源**。
-以后换电脑、换浏览器或清理过浏览器数据（localStorage 被清空），都要重新走一遍 4–6 步。
+邮件读取仅限 INBOX、指定发件人和 To 收件人，排除申请前已有的邮件与过早到达的邮件。
+使用只读 IMAP 和 `BODY.PEEK[]`，不标记已读、不删除邮件。转发改变 To、进入垃圾箱或提取
+出多个不同验证码时会失败；正则最多一个捕获组，可按真实邮件文字调整。
+邮箱模式忽略外部 Cookie、FP 与 UA。`--dry-run` 会拒绝邮箱模式，防止只读检查意外发码。
 
-### 支持的 Cookie 格式
+登录页先等待主文档响应，再等待邮箱输入框；仅发码前的页面访问会重试。
+登录响应体可能因立即跳转而丢失，脚本会复核本站控制台跳转与 `/api/user/session`，
+服务端返回 `HTTP 200 / code=0` 才继续。明确的 JSON 拒绝和人机验证不会进入成功兜底。
+日志只记录阶段、HTTP/内容类型、固定资源分类和报错数量，不输出验证码或登录页截图。
 
-完整单行请求头（推荐，原样透传，不做 HTML/URL 解码）：
+## 凭据与故障判断
 
-~~~text
-koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新签名
-~~~
-
-也支持：带 `Cookie:` 前缀、整段外层引号、Cookie-Editor 的 JSON 数组。
-
-Cookie **不需要**四项都齐：只要同时有 `gld:sess` 和 `gld:sess.sig` 就算合格，
-`koa` 两项可有可无、有多余字段也不影响（都原样透传）。真实长度参考：
-`gld:sess` 约 52 字符、`gld:sess.sig` 约 29 字符，两项合起来整串也就 100 字节出头，
-所以脚本**不会**因为"整串短"而拒绝。会被拒绝并给出提示的只有三种：
-
-| 情况 | 提示 |
+| 现象 | 处理 |
 | --- | --- |
-| 只有 `koa:sess` + `koa:sess.sig` | 旧版会话，需重新登录取 `gld` 会话 |
-| 缺 `gld:sess` 或 `gld:sess.sig` | 列出实际拿到的字段名 |
-| 字段名齐但值只有几个字符 | `…值只有 N 个字符，不像完整会话值…基本可以确定复制被截断` |
+| 发码接口 `captcha_required` | 本次邮箱登录需要人工验证；可复用手动登录后的有效 Cookie |
+| Cookie API `没有权限` / `code=-2` | 本次会话未被接受，检查是否复制完整、是否已过期或被吊销 |
+| 签到接口 `device-mismatch` | 核对同一登录浏览器的 Cookie、缓存指纹和 UA |
+| `please checkin via ...` | 核对签到 token，当前默认 `glados.cloud` |
+| `未配置 SCHEDULE_TOKEN` | 随机排程未启用，需要独立配置 GitHub Token；不代表邮箱或 Cookie 错误 |
+| `未配置完整 SMTP` | 未启用失败邮件通知，与 QQ IMAP 或签到认证是否成功无关 |
 
-最后一种要求在 Network 里右键 **Cookie → Copy value** 整行粘贴（手动框选长串容易截断）。
+本地 Python 需要可用的 SSL/TLS；CI 使用 Python 3.12。Cookie API 只依赖 `requirements.txt`；
+邮箱模式和浏览器点击备选还需要 `requirements-browser.txt` 与 Chromium 或已安装的 Chrome/Edge。
 
 ## 随机签到时间
 
@@ -237,8 +161,8 @@ GitHub 的调度仍可能延迟或遗漏，设置的分钟不能保证准点到�
 | 名称 | 类型 | 默认与用途 |
 | --- | --- | --- |
 | `GLADOS_COOKIE` | Secret | 必填；完整 Cookie |
-| `GLADOS_FP` | Secret | 必填；登录设备的 `fp1.…` 指纹 |
-| `GLADOS_USER_AGENT` | Variable | 建议填；登录浏览器的完整 UA |
+| `GLADOS_FP` | Secret | 可选；明确出现设备不匹配时，从同一登录网页读取的真实缓存值 |
+| `GLADOS_USER_AGENT` | Variable | 可选；同一登录浏览器的完整 UA |
 | `SCHEDULE_TOKEN` | Secret | 自动保存下次随机触发时间；仅本仓库 Contents/Workflows 读写权限 |
 
 本地还可以用 `GLADOS_FP_FILE` 指向存放指纹的文件（省去复制粘贴），
@@ -253,8 +177,8 @@ GitHub 的调度仍可能延迟或遗漏，设置的分钟不能保证准点到�
 | 脚本 | 用途 |
 | --- | --- |
 | `diag_status.py` | 只发一次 `/api/user/status`，判断 Cookie 现在还有没有效（不起浏览器） |
-| `print_fingerprint.py` | 在登录设备上导出 `fp1.…` 指纹 |
-| `checkin.py --dry-run` | 打开签到页、报告登录态与按钮状态，但不点击、不等待 |
+| `print_fingerprint.py` | 独立测试浏览器的指纹探测；不能替代原登录网页的缓存导出 |
+| `checkin.py --dry-run` | Cookie API 模式只查询 status，不提交签到；浏览器模式检查页面和按钮 |
 
 常见对照：
 
@@ -270,12 +194,12 @@ GitHub 的调度仍可能延迟或遗漏，设置的分钟不能保证准点到�
 - `code=0`，或 `Checkin!`、`Checkin Repeats! Please Try Tomorrow`、
   `Today's observation logged` → 成功（含今日已签到）；
 - 按钮处于 `disabled`/`is-done`（站点自身"已完成"状态）→ 按今日已签到处理；
-- `没有权限` / `HTTP 401/403` → 致命：Cookie 需要重新获取；
+- `没有权限` / `HTTP 401/403` → 致命：检查 Cookie 是否被接受或站点是否要求验证；
 - `code=4` 且 `reason=device-mismatch` → 致命：指纹/UA 需要与登录设备对齐；
-- 超时、429、5xx → 同一次运行内最多重试 2 次（间隔 60 秒）。
+- 超时、429、5xx → Cookie API 最多请求两次（间隔 5 秒）；浏览器模式按原有 60 秒间隔重试。
 
 退出码：`0` 成功，`1` 配置/认证类错误，`2` 临时故障。
-失败时会把截图上传为 `checkin-failure-screenshots` 工件（保留 7 天）。
+浏览器签到失败时可上传 `checkin-failure-screenshots`（保留 7 天）；Cookie API 模式不生成截图。
 
 ## 本机运行（依赖装在仓库内的隔离虚拟环境）
 
@@ -284,24 +208,20 @@ GitHub 的调度仍可能延迟或遗漏，设置的分钟不能保证准点到�
 ~~~powershell
 pwsh -File setup_env.ps1          # 创建 .venv，安装 requests + playwright，并尽量下载 Chromium
 
-# 导出登录设备的指纹（会弹出浏览器窗口）
-& .venv\Scripts\python.exe print_fingerprint.py
-
-# 确认 Cookie 当前是否有效（只查一次 status，不起浏览器）
-& .venv\Scripts\python.exe -u diag_status.py
-
-# 只看登录态，不等待随机时间、不点击（推荐先跑这个）
+# 从已登录网页 Network 复制 Cookie 后，检查会话（不签到、不起浏览器）
+$env:GLADOS_AUTH_MODE='cookie'
+$env:GLADOS_CHECKIN_METHOD='api'
 $env:GLADOS_COOKIE='gld:sess=...; gld:sess.sig=...'
-$env:GLADOS_FP='fp1.xxxxxxxx...'
-& .venv\Scripts\python.exe checkin.py --dry-run --channel chrome
+& .venv\Scripts\python.exe checkin.py --dry-run
 
 # 真正签到（立即执行；--no-jitter 仅为兼容旧命令）
-& .venv\Scripts\python.exe checkin.py --no-jitter --channel chrome
+& .venv\Scripts\python.exe checkin.py --no-jitter
 
 # 离线单测（不需要浏览器）
 & .venv\Scripts\python.exe -B -m unittest -q
 ~~~
 
+需要浏览器点击备选时，设 `GLADOS_CHECKIN_METHOD=browser`。
 `--channel chrome`（或 `msedge`）让 Playwright 直接用系统里已装好的浏览器，
 不必下载 Chromium；CI 上则用 `python -m playwright install --with-deps chromium`。
 浏览器缓存默认写到 `.ms-playwright/`（已在 `.gitignore`），不污染用户目录。

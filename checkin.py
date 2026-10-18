@@ -1,7 +1,7 @@
 """GLaDOS 每日签到编排入口。
 
-签到动作由 browser_checkin.py 用真实 Chromium 完成（见该模块顶部说明）；
-本模块负责：选择 Cookie/邮箱登录模式、调用浏览器签到、失败通知与退出码。
+Cookie 默认由 api_checkin.py 请求接口；邮箱登录与浏览器点击备选由 browser_checkin.py 完成。
+本模块负责选择后端、失败通知与退出码。
 
 退出码：0 成功或今日已签到，1 配置/认证等需要人工处理的错误，2 临时网络或服务故障。
 """
@@ -10,6 +10,7 @@ import sys
 from email.message import EmailMessage
 
 import browser_checkin
+import api_checkin
 from email_login import email_mode
 from glados_cookie import (
     FatalError,
@@ -57,15 +58,20 @@ def main(argv=None):
     browser_checkin.apply_arg_overrides(args)
     try:
         cookie = None if email_mode() else require_cookie()
-        code, result = browser_checkin.run(
-            cookie_header=cookie,
-            headless=not args.headed,
-            dry_run=args.dry_run,
-            apply_jitter=False,
-            channel=args.channel,
-        )
+        backend = api_checkin.resolve_backend()
+        if backend == "api":
+            code, result = api_checkin.run(cookie_header=cookie, dry_run=args.dry_run)
+        else:
+            code, result = browser_checkin.run(
+                cookie_header=cookie,
+                headless=not args.headed,
+                dry_run=args.dry_run,
+                apply_jitter=False,
+                channel=args.channel,
+            )
         if code != EXIT_OK:
-            send_failure_email(f"{result.message}\n{browser_checkin._fatal_hint(result)}")
+            hint = browser_checkin._fatal_hint(result) if backend == "browser" else "请查看 Cookie API 的具体回复。"
+            send_failure_email(f"{result.message}\n{hint}")
         return code
     except FatalError as exc:
         log(f"ERROR: {exc}")

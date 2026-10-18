@@ -29,6 +29,7 @@ def main():
         "Accept": "application/json, text/plain, */*",
         "User-Agent": user_agent,
         "Referer": "https://glados.cloud/console/checkin",
+        "Cookie": cookie,
     })
     try:
         with urllib.request.urlopen(request, timeout=30) as response:

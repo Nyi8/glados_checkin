@@ -1,9 +1,6 @@
-"""GLaDOS Cookie 解析、校验与脱敏日志。
+"""GLaDOS Cookie 解析、完整性检查与脱敏。会话是否有效由服务端判定。
 
-2026-09 版 GLaDOS 会话使用 gld:sess + gld:sess.sig；旧的 koa:sess 会话在新版
-API 上会返回 {"code":-2,"message":"没有权限"}。本模块把两种格式都解析出来，
-但只把含完整 gld 会话的 Cookie 视为可用，并在明显是旧版/截断内容时提前失败，
-避免向服务端发送注定被拒绝的凭据。
+允许完整的 gld 或 koa 会话，不能只根据名称判断某个账号的 Cookie 已失效。
 """
 import hashlib
 import html
@@ -143,7 +140,7 @@ def session_cookie_kind(cookie):
 
 
 def require_current_session(cookie):
-    """新版 API 只接受完整 gld 会话，旧版/截断内容提前给出可操作提示。"""
+    """仅供明确要求 gld 格式的调用检查结构；普通签到使用 require_supported_session。"""
     kind = session_cookie_kind(cookie)
     names = [name for name, _ in parse_cookie_pairs(cookie)]
     if kind == "gld":
@@ -160,12 +157,10 @@ def require_current_session(cookie):
         return "gld"
     if kind == "koa":
         raise FatalError(
-            "Cookie 只有旧版 koa:sess 会话，GLaDOS 2026 新版接口会返回“没有权限”。"
-            "请在 glados.cloud 重新登录，从成功的 /api/user/status 请求里复制含 "
-            "gld:sess 与 gld:sess.sig 的完整单行 Cookie 后更新 GLADOS_COOKIE。"
+            "此格式检查要求 gld:sess 与 gld:sess.sig；普通 Cookie API 签到也允许完整 koa 会话。"
         )
     raise FatalError(
-        "Cookie 缺少 gld:sess 或 gld:sess.sig，无法通过 GLaDOS 2026 新版认证。"
+        "此格式检查未找到完整的 gld:sess 与 gld:sess.sig。"
         f"当前字段（共 {len(cookie)} 字节）：{', '.join(names) if names else '<无>'}。"
     )
 
@@ -182,5 +177,17 @@ def require_cookie():
     fingerprint = hashlib.sha256(cookie.encode()).hexdigest()[:12]
     log(f"Cookie 输入长度={len(raw.strip())}，输入指纹={raw_fingerprint}；"
         f"请求头长度={len(cookie)}，请求头指纹={fingerprint}；会话类型={kind or '未识别'}。")
-    require_current_session(cookie)
+    require_supported_session(cookie)
     return cookie
+
+
+def require_supported_session(cookie):
+    """检查至少有一组完整会话；不凭名称假定有效或过期。"""
+    kind = session_cookie_kind(cookie)
+    if kind is None:
+        raise FatalError("Cookie 缺少完整会话：需要 gld:sess + gld:sess.sig 或 koa:sess + koa:sess.sig。")
+    required = CURRENT_SESSION_COOKIES if kind == "gld" else LEGACY_SESSION_COOKIES
+    for name, value in parse_cookie_pairs(cookie):
+        if name in required and len(value) < MIN_PLAUSIBLE_COOKIE_VALUE:
+            raise FatalError(f"Cookie 的 {name} 值过短，可能复制截断；请复制完整请求头。")
+    return kind

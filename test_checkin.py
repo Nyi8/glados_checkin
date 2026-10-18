@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import browser_checkin
+import api_checkin
 import checkin
 
 VALID_COOKIE = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
@@ -22,7 +23,7 @@ class MainTests(unittest.TestCase):
 
     def test_success_returns_zero_without_email(self):
         with patch.dict("os.environ", {"GLADOS_COOKIE": VALID_COOKIE}), \
-                patch.object(browser_checkin, "run",
+                patch.object(api_checkin, "run",
                              return_value=(checkin.EXIT_OK,
                                            browser_checkin.CheckinResult("success", "Checkin! Got 12"))) as run, \
                 patch.object(checkin, "send_failure_email") as email:
@@ -32,7 +33,7 @@ class MainTests(unittest.TestCase):
 
     def test_fatal_result_returns_one_and_emails(self):
         with patch.dict("os.environ", {"GLADOS_COOKIE": VALID_COOKIE}), \
-                patch.object(browser_checkin, "run",
+                patch.object(api_checkin, "run",
                              return_value=(checkin.EXIT_FATAL,
                                            browser_checkin.CheckinResult("fatal", "没有权限"))), \
                 patch.object(checkin, "send_failure_email") as email:
@@ -41,7 +42,7 @@ class MainTests(unittest.TestCase):
 
     def test_retryable_result_returns_two(self):
         with patch.dict("os.environ", {"GLADOS_COOKIE": VALID_COOKIE}), \
-                patch.object(browser_checkin, "run",
+                patch.object(api_checkin, "run",
                              return_value=(checkin.EXIT_RETRYABLE,
                                            browser_checkin.CheckinResult("retryable", "timeout"))), \
                 patch.object(checkin, "send_failure_email") as email:
@@ -50,7 +51,7 @@ class MainTests(unittest.TestCase):
 
     def test_bad_cookie_fails_before_starting_a_browser(self):
         with patch.dict("os.environ", {"GLADOS_COOKIE": "koa:sess=abc; koa:sess.sig=def"}), \
-                patch.object(browser_checkin, "run") as run, \
+                patch.object(api_checkin, "run") as run, \
                 patch.object(checkin, "send_failure_email") as email:
             self.assertEqual(checkin.main([]), checkin.EXIT_FATAL)
         run.assert_not_called()
@@ -58,7 +59,7 @@ class MainTests(unittest.TestCase):
 
     def test_unexpected_exception_is_reported_as_fatal(self):
         with patch.dict("os.environ", {"GLADOS_COOKIE": VALID_COOKIE}), \
-                patch.object(browser_checkin, "run", side_effect=RuntimeError("boom")), \
+                patch.object(api_checkin, "run", side_effect=RuntimeError("boom")), \
                 patch.object(checkin, "send_failure_email") as email:
             self.assertEqual(checkin.main([]), checkin.EXIT_FATAL)
         email.assert_called_once()

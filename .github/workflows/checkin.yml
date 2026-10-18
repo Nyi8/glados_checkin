@@ -35,21 +35,43 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-browser.txt
+          python -m pip install -r requirements.txt
+
+      - name: Select checkin backend
+        id: backend
+        env:
+          GLADOS_AUTH_MODE: ${{ vars.GLADOS_AUTH_MODE }}
+          GLADOS_CHECKIN_METHOD: ${{ vars.GLADOS_CHECKIN_METHOD }}
+        run: |
+          python - <<'PY'
+          import os
+          from api_checkin import resolve_backend
+          backend = resolve_backend()
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('browser=' + str(backend == 'browser').lower() + '\n')
+          print('Checkin backend: ' + backend)
+          PY
+
+      - name: Install browser dependencies
+        if: steps.backend.outputs.browser == 'true'
+        run: python -m pip install -r requirements-browser.txt
 
       - name: Cache Chromium
+        if: steps.backend.outputs.browser == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('requirements-browser.txt') }}
 
       - name: Install Chromium
+        if: steps.backend.outputs.browser == 'true'
         run: python -m playwright install --with-deps chromium
 
       - name: Verify script (offline unit tests)
         run: python -B -m unittest -q
 
       - name: Verify login redirect handling (isolated browser test)
+        if: steps.backend.outputs.browser == 'true'
         env:
           GLADOS_BROWSER_TESTS: "1"
         run: python -B -m unittest -q test_login_redirect
@@ -61,6 +83,8 @@ jobs:
         env:
           # email 模式在当前浏览器登录后直接签到，不依赖手工导出的 Cookie/FP/UA。
           GLADOS_AUTH_MODE: ${{ vars.GLADOS_AUTH_MODE }}
+          GLADOS_CHECKIN_METHOD: ${{ vars.GLADOS_CHECKIN_METHOD }}
+          GLADOS_CHECKIN_TOKEN: ${{ vars.GLADOS_CHECKIN_TOKEN }}
           GLADOS_EMAIL: ${{ secrets.GLADOS_EMAIL }}
           QQ_IMAP_USERNAME: ${{ secrets.QQ_IMAP_USERNAME }}
           QQ_IMAP_AUTH_CODE: ${{ secrets.QQ_IMAP_AUTH_CODE }}

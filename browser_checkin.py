@@ -1,10 +1,8 @@
 """用真实 Chromium 打开 GLaDOS 签到页，模拟点击签到按钮。
 
-为什么不直接 POST /api/user/checkin：
-  GLaDOS 2026 版接口会校验登录设备，并且只有真实浏览器才会带上与登录设备
-  一致的 Sec-CH-UA、Accept-Language、TLS 指纹和站点自身注入的请求头。
-  用 requests 直连时，旧版 koa 会话或非浏览器指纹会直接得到
-  {"code":-2,"message":"没有权限"}。
+Cookie 默认使用 api_checkin.py 直接请求；本模块提供浏览器点击备选与邮箱登录。
+服务端出现 device-mismatch 时需要核对该账号的 Cookie 与登录设备信息，不能
+把所有“没有权限”都归因于 TLS 或假定所有 koa 会话已经失效。
 
 支持导入 Cookie 或通过 QQ 邮箱验证码登录，退出码语义与 checkin.py 一致：
   0 成功或今日已签到，1 需要人工处理的致命错误，2 临时故障。
@@ -171,7 +169,7 @@ def get_fingerprint():
     if not FP_PATTERN.match(value):
         raise FatalError(
             "GLADOS_FP 格式不正确：应当是 fp1. 开头加 16-64 位十六进制，"
-            f"当前长度 {len(value)}；请用 python -u print_fingerprint.py 重新导出。"
+            f"当前长度 {len(value)}；请从已登录网页的 localStorage 复制实际值。"
         )
     return value
 
@@ -180,8 +178,8 @@ def _install_fingerprint(context, fingerprint):
     """把指纹写进 localStorage，让站点的指纹计算函数直接命中缓存。
 
     站点逻辑是：localStorage["glados.fp.v1"] 命中正则就拿来当 Authorization；
-    否则用 canvas/webgl/时区等实时计算。runner 上没有 GPU、platform 也是 Linux，
-    实时算出来的必然与登录设备不一致，所以这里必须沿用登录时的缓存值。
+    否则用 canvas/webgl/时区等实时计算。仅在该会话确实需要设备校验时，
+    沿用用户从同一已登录浏览器导出的缓存值。
     """
     context.add_init_script(
         """
@@ -276,7 +274,7 @@ def read_account(page):
 SESSION_LOST_HINT = (
     "会话未生效：签到页把请求重定向走了（未登录/会话失效时 GLaDOS 会回到首页或登录页）。"
     "请在 glados.cloud 用电脑浏览器重新登录，从成功的 /api/user/status 请求里复制完整 Cookie"
-    "（同时含 gld:sess 与 gld:sess.sig）更新 GLADOS_COOKIE，并把同一浏览器的完整 "
+    "（保留实际出现的 gld/koa 会话字段）更新 GLADOS_COOKIE，并把同一浏览器的完整 "
     "User-Agent 写到 GLADOS_USER_AGENT。"
 )
 
@@ -417,7 +415,7 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
     cookie = None if use_email else (cookie_header or require_cookie())
     kind = session_cookie_kind(cookie) if cookie else None
     if not use_email and kind != "gld":
-        log("WARNING: Cookie 未包含完整 gld:sess 与 gld:sess.sig，新版接口很可能会拒绝。")
+        log("Cookie 使用 koa 或其他会话格式，是否有效以服务端回复为准。")
 
     # 保留 apply_jitter 参数兼容旧调用，但不再为随机签到时间占用 runner。
     if dry_run:
@@ -452,8 +450,8 @@ def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEM
                 _install_fingerprint(context, fingerprint)
                 log(f"已注入设备指纹 {fingerprint[:12]}…（来源 GLADOS_FP，共 {len(fingerprint)} 字符）")
             elif not use_email:
-                log("WARNING: 未配置 GLADOS_FP，将使用 runner 实时计算的指纹；"
-                    "服务端大概率返回 device-mismatch。请用 print_fingerprint.py 从登录设备导出。")
+                log("未配置 GLADOS_FP，将使用当前浏览器设备信息；"
+                    "如接口明确返回 device-mismatch，再从原已登录浏览器导出实际值。")
             if cookie:
                 context.add_cookies(_cookie_list(cookie))
                 log(f"已注入 {len(parse_cookie_pairs(cookie))} 个 Cookie 字段（不显示值）。")
@@ -533,14 +531,13 @@ def _fatal_hint(result):
         return (
             "GLaDOS 用浏览器里的设备指纹（localStorage 的 glados.fp.v1，作为 Authorization "
             "请求头发送）校验登录设备，runner 上算出来的指纹与登录设备不同，所以被拒。"
-            "请在登录 GLaDOS 的那台电脑上执行："
-            "& .venv\\Scripts\\python.exe print_fingerprint.py，"
-            "把输出的 fp1.… 存为仓库 Secret GLADOS_FP，同时确认 GLADOS_USER_AGENT 是同一浏览器的完整 UA。"
+            "请在已经登录 GLaDOS 的网页控制台读取 localStorage.getItem('glados.fp.v1')，"
+            "存为 Secret GLADOS_FP；用 navigator.userAgent 读取同一浏览器的 UA，写入 GLADOS_USER_AGENT。"
         )
     if any(marker in message.lower() for marker in AUTH_ERROR_MARKERS) or "没有权限" in message:
         return (
             "Cookie 未被接受。请确认 GLADOS_COOKIE 是登录后从成功的 /api/user/status 请求里"
-            "复制的完整单行 Cookie，并且同时含 gld:sess 与 gld:sess.sig。"
+            "复制的完整单行 Cookie，保留实际出现的 gld/koa 会话字段。"
         )
     return "请查看上方日志与 artifacts 里的失败截图。"
 
