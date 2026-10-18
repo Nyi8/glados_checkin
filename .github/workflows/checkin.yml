@@ -2,8 +2,10 @@ name: GLaDOS Checkin
 
 on:
   schedule:
-    # 北京时间 09:00；脚本内再随机等待 0-90 分钟才真正点击签到。
+    # 首次按北京时间 09:00 启动；后续由 random_schedule.py 同步 config 和下一次日期。
+    # BEGIN GLADOS RANDOM SCHEDULE
     - cron: "0 1 * * *"
+    # END GLADOS RANDOM SCHEDULE
   workflow_dispatch:
 
 permissions:
@@ -16,8 +18,7 @@ concurrency:
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    # 必须大于「随机等待上限 + 浏览器安装 + 重试」，默认上限 90 分钟。
-    timeout-minutes: 150
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -56,7 +57,7 @@ jobs:
       - name: Run checkin script
         id: checkin
         continue-on-error: true
-        timeout-minutes: 140
+        timeout-minutes: 12
         env:
           # email 模式在当前浏览器登录后直接签到，不依赖手工导出的 Cookie/FP/UA。
           GLADOS_AUTH_MODE: ${{ vars.GLADOS_AUTH_MODE }}
@@ -70,10 +71,6 @@ jobs:
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           # 登录设备的指纹；不配置时服务端会返回 code=4 / device-mismatch。
           GLADOS_FP: ${{ secrets.GLADOS_FP }}
-          GLADOS_JITTER_MIN_MINUTES: ${{ vars.GLADOS_JITTER_MIN_MINUTES }}
-          GLADOS_JITTER_MAX_MINUTES: ${{ vars.GLADOS_JITTER_MAX_MINUTES }}
-          # 手动触发时立即签到，不定时触发的自动任务才做随机等待。
-          GH_EVENT: ${{ github.event_name }}
           GLADOS_SCREENSHOT_ON_FAIL: "1"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -82,7 +79,15 @@ jobs:
           SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
-        run: python -u checkin.py
+        run: python -u checkin.py --no-jitter
+
+      - name: Save the next random checkin time
+        if: ${{ always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        timeout-minutes: 3
+        env:
+          SCHEDULE_TOKEN: ${{ secrets.SCHEDULE_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python -u random_schedule.py
 
       - name: Upload failure screenshots
         if: steps.checkin.outcome == 'failure'

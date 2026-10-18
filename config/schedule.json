@@ -1,0 +1,8 @@
+{
+  "base_time": "09:00",
+  "min_offset_minutes": 0,
+  "max_offset_minutes": 90,
+  "next_offset_minutes": null,
+  "next_run_at": null,
+  "cron": "0 1 * * *"
+}

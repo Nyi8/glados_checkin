@@ -1,7 +1,8 @@
 # GLaDOS 自动签到（真实浏览器点击版）
 
-用 GitHub Actions 每天北京时间 **09:00 唤醒**，脚本内再**随机等待 0–90 分钟**，
-然后用真实 Chromium 打开签到页、**模拟点击签到按钮**完成签到。
+用 GitHub Actions 在北京时间 **09:00–10:30** 之间的随机时刻启动，
+启动后立即用真实 Chromium 打开签到页并点击签到，**不再让 runner 随机空等**。
+每次运行结束后生成下一次的随机时间，保存到 `config/schedule.json`，并同步更新工作流 cron。
 
 ## 推荐方案：QQ 邮箱验证码自动登录
 
@@ -38,8 +39,8 @@ Cookie 和站点生成的设备指纹都来自本次运行，避免把电脑上�
 `Access Code:\s*([A-Za-z0-9]{6})`，需要与邮件的实际文字一致。
 正则最多一个捕获组；存在多个不同的匹配结果时不提交，避免把其他数字当成验证码。
 
-配置后手动执行一次 **Run workflow** 验证完整登录与签到，之后继续沿用每天
-北京时间 09:00 唤醒、随机等待 0–90 分钟的原定时任务。脚本无需新增第三方依赖。
+配置后手动执行一次 **Run workflow** 验证完整登录与签到；配置下文的 `SCHEDULE_TOKEN` 后，
+即可每天在随机时刻启动并立即签到。脚本无需新增第三方依赖。
 已有失败邮件配置可以继续使用；它和读取验证码的 IMAP 配置相互独立。
 授权码只存入 Secrets，不要写进代码、提交到 Git 或粘贴到聊天里。
 
@@ -172,19 +173,62 @@ Cookie **不需要**四项都齐：只要同时有 `gld:sess` 和 `gld:sess.sig`
 
 ## 随机签到时间
 
-- 工作流定时：`cron: "0 1 * * *"` = 北京时间 **09:00 唤醒**；
-- 脚本内等待 `GLADOS_JITTER_MIN_MINUTES`–`GLADOS_JITTER_MAX_MINUTES`
-  （默认 `0`–`90`）之间的**随机**时长，然后才点击签到；
-- 也就是实际签到落在 **09:00–10:30** 之间的随机时刻，每天不同；
-- **手动 `Run workflow` 不等待**（识别 `workflow_dispatch` 后立即签到），
-  方便你随时验证；只有定时任务才做随机等待；
-- 本地也可以 `--no-jitter` 跳过等待；
-- 这段等待确实占用 Actions 的运行时长（私有仓库按分钟计费，按墙钟时间算，
-  90 分钟等待就是 90 分钟额度）。本仓库是公开仓库，Actions 分钟数免费且不限量，
-  所以没有额外开销；如果之后改成私有仓库，可把 `GLADOS_JITTER_MAX_MINUTES`
-  调小（例如 30）来省额度；
-- 日志会打印随机等待时长和真实点击时间，方便核对；
-- GitHub 定时任务在高峰期本身可能延迟，实际时间会相应后移（日志以真实点击时间为准）。
+每次手动或定时运行都立即签到。无论本次签到成功或失败，任务都会尝试为**明天**选择一个
+随机分钟偏移，原子提交 `config/schedule.json` 和 `.github/workflows/checkin.yml`，
+并在日志与运行摘要中展示下一次时间。正常运行之间不会占用 runner 等待。
+
+GitHub 的 `on.schedule` 使用静态 cron，不能在触发前动态读取仓库文件，
+所以脚本会把 config 的时间同步成 UTC cron；cron 同时指定下一次的日/月，
+避免改成今天较晚的时间后当天再次触发。首次部署保留北京时间 09:00 的每日启动入口，
+第一次运行完成后才切换为指定日期的随机触发。
+参见 [GitHub 调度说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
+
+随机范围在 `config/schedule.json` 中修改：
+
+```json
+{
+  "base_time": "09:00",
+  "min_offset_minutes": 0,
+  "max_offset_minutes": 90,
+  "next_offset_minutes": null,
+  "next_run_at": null,
+  "cron": "0 1 * * *"
+}
+```
+
+上面是首次部署的初始状态。你只需要修改前三项：基准时间按北京时间填写，
+偏移需满足 `0 <= min <= max <= 120`，且窗口不能跨过午夜。
+后三项由脚本维护；例如随机到 `37`，会保存明天 `09:37:00+08:00`，同时生成对应 cron。
+修改范围后可手动运行一次签到，使新范围应用到下一次排程。
+原来的 `GLADOS_JITTER_MIN_MINUTES`、`GLADOS_JITTER_MAX_MINUTES` 已不再使用，
+`--no-jitter` 仍兼容旧命令，但现在不加这个参数也不会随机等待。
+网络/接口故障后的短暂重试仍保留。
+
+### 一次性配置 SCHEDULE_TOKEN
+
+自动改写工作流需要额外的工作流写权限，默认 `GITHUB_TOKEN` 不足以完成该操作。
+创建仅限这个仓库的 fine-grained personal access token：
+
+1. GitHub 右上角头像 → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**。
+2. **Resource owner** 选择仓库所属账号；**Repository access** 选 **Only select repositories**，只勾选 `glados_checkin`。
+3. **Repository permissions** 设置 **Contents: Read and write**、**Workflows: Read and write**；Metadata 保持自动的 Read。
+4. 生成 Token，把它保存到签到仓库 **Settings → Secrets and variables → Actions → Secrets → New repository secret**，名称为 **`SCHEDULE_TOKEN`**，值仅填写 Token 本身。
+5. 同步最新代码到默认分支，手动 **Run workflow** 一次，确认 **Save the next random checkin time** 步骤成功，仓库 config 与 cron 已自动更新。
+
+Token 的有效期按你的账号策略设置，到期需更新 Secret；它不替代邮箱授权码。
+权限依据：[GitHub Token 创建说明](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)、
+[工作流文件写权限](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)。
+若默认分支保护阻止该 Token 直接提交，排程更新会失败；脚本不会强推或绕过分支保护。
+
+缺少 Token 或更新失败时，本次签到仍会执行，但排程步骤报错，远程原 cron 不变。
+原有保活工作流每天检查一次：若已安排的日期早于今天，会尝试补排到今天尚可用的窗口，
+窗口已过则安排明天；待执行的今天排程不会因 GitHub 延迟而被提前改写。
+保活修复同样需要有效 Token；更新失败需要根据日志修正权限/有效期。
+GitHub 的调度仍可能延迟或遗漏，设置的分钟不能保证准点到达。
+
+每日自动提交只修改 config 和 cron 标记块，并保留其他文件；遇到并发提交会重新读取默认分支，
+不使用强制更新。你在本地修改仓库前先拉取远程更新，避免和自动排程提交冲突。
+本地可用 `python random_schedule.py --preview` 预览下一次时间，该命令不访问 GitHub，也不保存改动。
 
 ## 配置项
 
@@ -195,8 +239,7 @@ Cookie **不需要**四项都齐：只要同时有 `gld:sess` 和 `gld:sess.sig`
 | `GLADOS_COOKIE` | Secret | 必填；完整 Cookie |
 | `GLADOS_FP` | Secret | 必填；登录设备的 `fp1.…` 指纹 |
 | `GLADOS_USER_AGENT` | Variable | 建议填；登录浏览器的完整 UA |
-| `GLADOS_JITTER_MIN_MINUTES` | Variable | 0；随机等待下限（分钟） |
-| `GLADOS_JITTER_MAX_MINUTES` | Variable | 90；随机等待上限（分钟，最大 120） |
+| `SCHEDULE_TOKEN` | Secret | 自动保存下次随机触发时间；仅本仓库 Contents/Workflows 读写权限 |
 
 本地还可以用 `GLADOS_FP_FILE` 指向存放指纹的文件（省去复制粘贴），
 以及 `GLADOS_BROWSER_CHANNEL=chrome|msedge` 复用系统浏览器。
@@ -252,7 +295,7 @@ $env:GLADOS_COOKIE='gld:sess=...; gld:sess.sig=...'
 $env:GLADOS_FP='fp1.xxxxxxxx...'
 & .venv\Scripts\python.exe checkin.py --dry-run --channel chrome
 
-# 真正签到（会随机等待，用 --no-jitter 可跳过等待）
+# 真正签到（立即执行；--no-jitter 仅为兼容旧命令）
 & .venv\Scripts\python.exe checkin.py --no-jitter --channel chrome
 
 # 离线单测（不需要浏览器）
@@ -268,5 +311,6 @@ $env:GLADOS_FP='fp1.xxxxxxxx...'
 ## 定时任务与保活
 
 工作流支持手动 `Run workflow` 测试；`concurrency` 保证不会同时跑两个签到。
-保活工作流保持原样：每 45 天提交一次空提交，避免定时任务被停用，
-需要仓库 Settings → Actions → General → Workflow permissions 开启 Read and write。
+保活工作流每天北京时间 08:17 唤醒，仍保留每 45 天提交一次空提交的行为，
+并检查随机排程是否过期；过期时使用 `SCHEDULE_TOKEN` 修复。
+空提交保活需要仓库 Settings → Actions → General → Workflow permissions 开启 Read and write。

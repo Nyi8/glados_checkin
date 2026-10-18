@@ -12,7 +12,6 @@
 import argparse
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -49,7 +48,6 @@ SELECTOR_TIMEOUT_MS = 45_000
 CLICK_TIMEOUT_MS = 45_000
 RETRY_DELAY_SECONDS = 60
 MAX_ATTEMPTS = 2
-MAX_JITTER_MINUTES = 120
 
 SUCCESS_MARKERS = ("checkin! got", "checkin repeats", "observation logged")
 ALREADY_CHECKED_IN_MARKERS = (
@@ -128,29 +126,6 @@ def classify_page_state(text, payload=None):
     if any(marker in lowered for marker in AUTOMATION_MARKERS):
         return CheckinResult("retryable", text.strip()[:200], source="dom")
     return CheckinResult("retryable", "没有捕获到签到接口回复，页面也没有结果文案", source="dom")
-
-
-def jitter_seconds(min_minutes, max_minutes):
-    """返回本次运行要随机等待的秒数；区间非法时抛 FatalError。"""
-    if not 0 <= min_minutes <= max_minutes <= MAX_JITTER_MINUTES:
-        raise FatalError(
-            f"随机等待区间非法：需要 0 <= 最小 <= 最大 <= {MAX_JITTER_MINUTES} 分钟，"
-            f"当前为 {min_minutes}–{max_minutes}。"
-        )
-    if max_minutes == min_minutes:
-        return float(min_minutes * 60)
-    return random.SystemRandom().uniform(min_minutes * 60, max_minutes * 60)
-
-
-def sleep_with_jitter(min_minutes, max_minutes):
-    seconds = jitter_seconds(min_minutes, max_minutes)
-    if seconds < 1:
-        log("随机等待：0 秒（本次不等待）。")
-        return 0
-    log(f"随机等待 {seconds / 60:.1f} 分钟（区间 {min_minutes}–{max_minutes} 分钟）后再签到，"
-        f"避免每天同一时间签到。")
-    time.sleep(seconds)
-    return seconds
 
 
 def _playwright_version():
@@ -430,29 +405,25 @@ def _load_sync_playwright():
 
 
 def run(cookie_header=None, headless=True, dry_run=False, max_attempts=MAX_ATTEMPTS,
-        retry_delay=RETRY_DELAY_SECONDS, apply_jitter=True, channel=None):
+        retry_delay=RETRY_DELAY_SECONDS, apply_jitter=False, channel=None):
     """打开浏览器完成签到，返回 (exit_code, CheckinResult)。"""
     use_email = email_mode()
     # dry-run 保持只读，不发送验证码。
     if use_email and dry_run:
         raise FatalError("邮箱模式的 --dry-run 不会申请验证码；请用 --no-jitter 测试完整登录签到。")
     if use_email:
-        QQMailbox()  # 先校验配置，避免随机等待后才发现缺少邮箱参数；此处不连接邮箱。
+        QQMailbox()  # 启动浏览器前校验邮箱配置；此处不连接邮箱。
     sync_playwright = _load_sync_playwright()
     cookie = None if use_email else (cookie_header or require_cookie())
     kind = session_cookie_kind(cookie) if cookie else None
     if not use_email and kind != "gld":
         log("WARNING: Cookie 未包含完整 gld:sess 与 gld:sess.sig，新版接口很可能会拒绝。")
 
-    if apply_jitter and not dry_run:
-        min_minutes = get_env("GLADOS_JITTER_MIN_MINUTES", "0")
-        max_minutes = get_env("GLADOS_JITTER_MAX_MINUTES", "90")
-        if get_env("GH_EVENT") == "workflow_dispatch":
-            log("检测到手动触发（workflow_dispatch），跳过随机等待，立即签到。")
-        else:
-            sleep_with_jitter(int(min_minutes), int(max_minutes))
-    elif dry_run:
-        log("dry-run：跳过随机等待，也不点击签到按钮。")
+    # 保留 apply_jitter 参数兼容旧调用，但不再为随机签到时间占用 runner。
+    if dry_run:
+        log("dry-run：不点击签到按钮。")
+    else:
+        log("立即开始签到；随机时间由 config/schedule.json 与工作流 cron 安排，不在运行中等待。")
 
     browser_channel = get_env("GLADOS_BROWSER_CHANNEL") or (channel or "")
     log(f"启动 Chromium（playwright {_playwright_version()}，headless={headless}，"
@@ -579,9 +550,9 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true",
                         help="只检查登录态与按钮，不等待随机时间、不点击")
     parser.add_argument("--headed", action="store_true", help="显示浏览器窗口（本机调试用）")
-    parser.add_argument("--no-jitter", action="store_true", help="跳过随机等待")
+    parser.add_argument("--no-jitter", action="store_true", help="兼容旧命令；现在默认立即签到")
     parser.add_argument("--timeout-seconds", type=int, default=None,
-                        help="随机等待上限覆盖值（分钟）")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--channel", default=None,
                         help="使用已安装的浏览器通道（如 chrome / msedge），"
                              "省去下载 Playwright Chromium")
@@ -590,7 +561,7 @@ def parse_args(argv=None):
 
 def apply_arg_overrides(args):
     if args.timeout_seconds is not None:
-        os.environ["GLADOS_JITTER_MAX_MINUTES"] = str(args.timeout_seconds)
+        log("--timeout-seconds 已停用；随机时间范围请修改 config/schedule.json。")
 
 
 def main(argv=None):
@@ -599,7 +570,7 @@ def main(argv=None):
 
     try:
         code, result = run(headless=not args.headed, dry_run=args.dry_run,
-                           apply_jitter=not args.no_jitter, channel=args.channel)
+                           apply_jitter=False, channel=args.channel)
     except FatalError as exc:
         log(f"ERROR: {exc}")
         return EXIT_FATAL

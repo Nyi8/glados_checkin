@@ -61,7 +61,7 @@ def main(argv=None):
             cookie_header=cookie,
             headless=not args.headed,
             dry_run=args.dry_run,
-            apply_jitter=not args.no_jitter,
+            apply_jitter=False,
             channel=args.channel,
         )
         if code != EXIT_OK:

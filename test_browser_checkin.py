@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import browser_checkin
-from browser_checkin import CheckinResult, classify_page_state, classify_payload, jitter_seconds
+from browser_checkin import CheckinResult, classify_page_state, classify_payload
 
 
 def ensure_playwright_available():
@@ -239,28 +239,6 @@ class FingerprintTests(unittest.TestCase):
         self.assertIn("Storage.prototype.getItem", script)
 
 
-class JitterTests(unittest.TestCase):
-    def test_zero_width_window(self):
-        self.assertEqual(jitter_seconds(0, 0), 0.0)
-
-    def test_window_bounds_are_respected(self):
-        for _ in range(200):
-            seconds = jitter_seconds(0, 90)
-            self.assertGreaterEqual(seconds, 0)
-            self.assertLessEqual(seconds, 90 * 60)
-
-    def test_invalid_window_is_rejected(self):
-        for window in ((-1, 10), (10, 5), (0, browser_checkin.MAX_JITTER_MINUTES + 1)):
-            with self.subTest(window=window), self.assertRaises(browser_checkin.FatalError):
-                jitter_seconds(*window)
-
-    def test_sleep_uses_the_computed_delay(self):
-        with patch.object(browser_checkin.random.SystemRandom, "uniform", return_value=600), \
-                patch.object(browser_checkin.time, "sleep") as sleep:
-            self.assertEqual(browser_checkin.sleep_with_jitter(0, 90), 600)
-        sleep.assert_called_once_with(600)
-
-
 class AttemptTests(unittest.TestCase):
     def setUp(self):
         self.logging = patch.object(browser_checkin, "log")
@@ -435,7 +413,7 @@ class RunTests(unittest.TestCase):
         playwright_cm, _ = self._fake_playwright(lambda: page)
         cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
         with self._patch_playwright(playwright_cm), \
-                patch.object(browser_checkin, "sleep_with_jitter") as jitter, \
+                patch.object(browser_checkin.time, "sleep") as jitter, \
                 patch.dict("os.environ", {"GLADOS_JITTER_MAX_MINUTES": "90"}):
             code, result = browser_checkin.run(cookie_header=cookie, headless=True,
                                                dry_run=True)
@@ -447,24 +425,24 @@ class RunTests(unittest.TestCase):
         playwright_cm, _ = self._fake_playwright(lambda: page)
         cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
         with self._patch_playwright(playwright_cm), \
-                patch.object(browser_checkin, "sleep_with_jitter") as jitter, \
+                patch.object(browser_checkin.time, "sleep") as jitter, \
                 patch.dict("os.environ", {"GH_EVENT": "workflow_dispatch"}):
             code, result = browser_checkin.run(cookie_header=cookie, headless=True,
                                                retry_delay=0)
         jitter.assert_not_called()
         self.assertTrue(result.ok)
 
-    def test_scheduled_run_still_waits(self):
+    def test_scheduled_run_starts_immediately_even_with_old_jitter_settings(self):
         page = FakePage()
         playwright_cm, _ = self._fake_playwright(lambda: page)
         cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
         with self._patch_playwright(playwright_cm), \
-                patch.object(browser_checkin, "sleep_with_jitter") as jitter, \
+                patch.object(browser_checkin.time, "sleep") as jitter, \
                 patch.dict("os.environ", {"GH_EVENT": "schedule",
                                           "GLADOS_JITTER_MIN_MINUTES": "5",
                                           "GLADOS_JITTER_MAX_MINUTES": "90"}):
-            browser_checkin.run(cookie_header=cookie, headless=True, retry_delay=0)
-        jitter.assert_called_once_with(5, 90)
+            browser_checkin.run(cookie_header=cookie, headless=True, retry_delay=0, apply_jitter=True)
+        jitter.assert_not_called()
 
     def test_missing_playwright_is_a_fatal_configuration_error(self):
         cookie = "gld:sess=" + "A" * 180 + "; gld:sess.sig=" + "B" * 120
