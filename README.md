@@ -140,3 +140,40 @@ koa:sess=...; koa:sess.sig=...
 5. 确保其中包含 `koa:sess` 和 `koa:sess.sig`
 
 建议不要只复制单个字段，直接复制整段 Cookie 并写入 `GLADOS_COOKIE`。
+
+## 后来者补充（主要是值的规范）
+
+### 1、新版GLADOS_COOKIE 
+
+如何获取   F12找到本地存储，里面有的，参考如下  **没有引号**  嫌麻烦可以用Cookie-Editor Edge扩展
+
+Repository secrets
+
+```txt
+Cookie: gld:sess=content;gld:sess.sig=content
+```
+### 2、新版GLADOS_USER_AGENT 
+
+获取同一台cookie获取网页，F12 控制台navigator.userAgent，复制值，参考如下 **没有引号**
+Repository variables
+
+```
+  Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0
+```
+
+### 3、一次性配置 SCHEDULE_TOKEN
+
+自动改写工作流需要额外的工作流写权限，默认 `GITHUB_TOKEN` 不足以完成该操作。 创建仅限这个仓库的 fine-grained personal access token：
+
+1. GitHub 右上角头像 → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**。
+
+2. **Resource owner** 选择仓库所属账号；**Repository access** 选 **Only select repositories**，只勾选 `glados_checkin`。
+
+3. **Repository permissions** 设置 **Contents: Read and write**、**Workflows: Read and write**；Metadata 保持自动的 Read。
+
+4. 生成 Token，把它保存到签到仓库 **Settings → Secrets and variables → Actions → Secrets → New repository secret**，名称为 **`SCHEDULE_TOKEN`**，值仅填写 Token 本身。（参考如下）
+
+```txt
+   github_pat_11ABCDEFG0a1b2c3d4eXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+5. 同步最新代码到默认分支，手动 **Run workflow** 一次，确认 **Save the next random checkin time** 步骤成功，仓库 config 与 cron 已自动更新。
