@@ -4,7 +4,7 @@ on:
   schedule:
     # 首次按北京时间 09:00 启动；后续由 random_schedule.py 同步 config 和下一次日期。
     # BEGIN GLADOS RANDOM SCHEDULE
-    - cron: "2 2 31 10 *"
+    - cron: "27 2 1 11 *"
     # END GLADOS RANDOM SCHEDULE
   workflow_dispatch:
 
